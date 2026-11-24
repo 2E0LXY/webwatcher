@@ -4,6 +4,76 @@ A small self-hosted price watcher. Paste the URL of a product, holiday or flight
 
 One static Go binary (Go standard library plus `modernc.org/sqlite` and `golang.org/x/net/html`), SQLite storage, server-rendered HTML with plain CSS and no JavaScript. It listens on `127.0.0.1` and is meant to sit behind Caddy.
 
+## Quick start (10 minutes)
+
+For personal use first: you and a few friends, on a Debian VPS with Caddy installed and a domain pointing at it (replace `watch.example.com` throughout).
+
+**1. Install.** Releases are published as pre-releases by CI; the installer finds the newest one, checks its SHA-256 and sets everything up. Preview first with `--dry-run`.
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/2E0LXY/webwatcher/main/deploy/install.sh
+sudo sh install.sh --domain watch.example.com --dry-run   # prints what it would do
+sudo sh install.sh --domain watch.example.com
+```
+
+If the repository is private, `export GITHUB_TOKEN=...` first, or build it yourself and add `--binary ./webwatcher`. It creates the `webwatcher` user and `/var/lib/webwatcher` (0700), writes `/etc/webwatcher.env` only if it does not exist (with a generated `WW_ADMIN_TOKEN` and your base URL), adds a validated Caddy site (after backing up the Caddyfile) and enables the service. It never asks for provider secrets. The service will not start until step 2 is done; that is deliberate.
+
+**2. Choose a WhatsApp path and edit `/etc/webwatcher.env`** (`sudo nano /etc/webwatcher.env`; uncomment one block).
+
+*Path A: Twilio WhatsApp sandbox (no template approval)*
+
+```sh
+WW_BASE_URL=https://watch.example.com
+WW_MESSENGER=twilio
+WW_TWILIO_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+WW_TWILIO_TOKEN=your-twilio-auth-token
+WW_TWILIO_FROM=+14155238886
+```
+
+- In the Twilio console open Messaging, Try it out, Send a WhatsApp message. Use the sandbox number shown there as `WW_TWILIO_FROM`.
+- Each person (you and each friend) sends the sandbox's `join <two-words>` code to that number from their own WhatsApp, once.
+- In Sandbox settings set **When a message comes in** to `https://watch.example.com/hook/twilio`, method `POST` (this makes STOP work).
+- Sandbox limits to know about: free-form messages only reach someone who has messaged the sandbox in the last 24 hours, and sandbox membership expires after a few days, so people re-send the join code now and then. It is fine for a handful of people, not for production.
+
+*Path B: Meta WhatsApp Cloud API (production)*
+
+```sh
+WW_BASE_URL=https://watch.example.com
+WW_MESSENGER=meta
+WW_WA_PHONE_ID=123456789012345
+WW_WA_TOKEN=your-permanent-access-token
+WW_WA_APP_SECRET=your-app-secret
+WW_WA_VERIFY_TOKEN=any-long-random-string-you-choose
+```
+
+- Create the two Utility templates `webwatcher_login` and `webwatcher_alert` and wait for approval (text in [Option A](#option-a-meta-whatsapp-cloud-api-ww_messengermeta) below).
+- In the Meta app's WhatsApp configuration set the callback URL to `https://watch.example.com/hook/meta` with your verify token, and subscribe to `messages`.
+- Until the templates are approved you can still log in with `adduser` (step 4), but alerts to numbers outside a 24-hour chat window will not be delivered.
+
+**3. Check it.**
+
+```sh
+sudo webwatcher doctor          # every line should be OK or WARN; it also prints the webhook URLs to paste
+sudo systemctl restart webwatcher
+journalctl -u webwatcher -n 20
+```
+
+`doctor` prints variable names only, never secret values.
+
+**4. Log in without WhatsApp.** Run this as the service user (not root, or the database would be created unreadable by the service):
+
+```sh
+sudo -u webwatcher webwatcher adduser +447700900123
+```
+
+It prints a one-time link (valid 15 minutes, single use, stored only as a hash) straight to your terminal; open it, press the confirm button, and you are in. The user is recorded with consent `admin-created`, so only add people who have agreed to receive messages from you. They can send STOP at any time. The command talks to the database directly; there is no web equivalent. Friends can use the normal login form (it sends the link over WhatsApp) once your provider is working for them, or you can run `adduser` for each of them and send them the link yourself.
+
+**5. Add a first watch and a target.** On the dashboard, under **Add a page to watch**, paste a single product or package page URL, optionally a label, enter a **target price** in pounds (you get a separate "below target" alert when the price falls to it or lower) and choose how often to check (1 hour is the default). Press **Start watching**; the first check happens shortly after and the row shows the last price and status. You can change the target later from the watch's page.
+
+**Honest note.** Webwatcher fetches pages like a plain HTTP client and does not evade bot protection. Many travel and retail sites (Jet2, TUI, easyJet and others) will answer with a block or a JavaScript-only page. When that happens the watch shows as **blocked** or **needs browser rendering**; it is reported, not bypassed, and there is nothing to configure that will change it. Try a different page for the same product, a CSS selector, or accept that the site cannot be watched.
+
+Upgrading later: re-run `sudo sh install.sh --domain watch.example.com`. It is idempotent and leaves `/etc/webwatcher.env` alone.
+
 ## What it does
 
 - Login by magic link sent over WhatsApp. No passwords. Single-use links that expire after 15 minutes; sessions last 30 days. The login form has a required opt-in tick ("I agree to receive WhatsApp messages from Webwatcher about my watches"), recorded with a timestamp. **Log out everywhere** on the Account page revokes every session.
@@ -36,6 +106,8 @@ One static Go binary (Go standard library plus `modernc.org/sqlite` and `golang.
 Supported syntax: tag, `*`, `.class`, `#id`, `[attr]`, `[attr=value]`, `[attr^=value]`, `[attr$=value]`, `[attr*=value]`, `[attr~=value]`, compounds such as `span.price[data-x]`, descendant (space) and child (`>`) combinators. No commas, pseudo-classes or sibling combinators. The text (or a `content`/`data-price` attribute) of the first match is searched for an amount.
 
 ## Installation
+
+The quick start above uses `deploy/install.sh`. The manual equivalent is below.
 
 Requires a Linux host, Caddy, and a WhatsApp sender (see below). Use a pre-built release binary, or build with Go 1.26:
 
