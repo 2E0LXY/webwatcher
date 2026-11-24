@@ -20,7 +20,7 @@ import (
 var version = "dev"
 
 func main() {
-	if len(os.Args) > 1 && (os.Args[1] == "doctor" || os.Args[1] == "adduser" || os.Args[1] == "loginlink" || os.Args[1] == "permalink" || os.Args[1] == "setadmin") {
+	if len(os.Args) > 1 && (os.Args[1] == "doctor" || os.Args[1] == "adduser" || os.Args[1] == "loginlink" || os.Args[1] == "permalink" || os.Args[1] == "setadmin" || os.Args[1] == "agenttoken") {
 		os.Exit(subcommand(os.Args[1], os.Args[2:]))
 	}
 	showVersion := flag.Bool("version", false, "print version and exit")
@@ -197,6 +197,15 @@ func subcommand(name string, args []string) int {
 			return 2
 		}
 		if err := app.SetAdmin(getenv, rest[0], *revoke, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			return 1
+		}
+	case "agenttoken":
+		if len(rest) != 1 {
+			fmt.Fprintln(os.Stderr, "usage: webwatcher agenttoken [-env FILE] [--revoke | --show-status] +447700900123")
+			return 2
+		}
+		if err := app.AgentToken(getenv, rest[0], app.AgentTokenOpts{Revoke: *revoke, Status: *status}, os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			return 1
 		}

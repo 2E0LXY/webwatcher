@@ -11,6 +11,7 @@
   <dt>Last checked</dt><dd>{{.Checked}}</dd>
   <dt>Found by</dt><dd>{{if .Method}}{{.Method}}{{else}}–{{end}}</dd>
   <dt>Check every</dt><dd>{{.Interval}}</dd>
+  <dt>Fetched by</dt><dd>{{if .FetchAgent}}Your home agent{{else}}This server{{end}}</dd>
   {{if .Selector}}<dt>CSS selector</dt><dd><code>{{.Selector}}</code></dd>{{end}}
 </dl>
 {{if .BasisChanged}}<p class="error">{{.BasisNote}}</p>
@@ -25,6 +26,9 @@
   <input id="target" name="target" inputmode="decimal" maxlength="15" value="{{.TargetVal}}">
   <label for="interval">Check every</label>
   <select id="interval" name="interval">{{range $.Intervals}}<option value="{{.Minutes}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}</select>
+  <label for="fetch">Fetch from</label>
+  <select id="fetch" name="fetch"><option value="server"{{if not .FetchAgent}} selected{{end}}>This server</option><option value="agent"{{if .FetchAgent}} selected{{end}}>My home agent</option></select>
+  {{if .SuggestAgent}}<p class="hint">This site usually blocks servers or needs JavaScript. If checks fail, choose My home agent.</p>{{end}}
   <button type="submit">Save</button>
 </form>
 </section>

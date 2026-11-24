@@ -27,6 +27,25 @@
 </section>
 
 <section class="card">
+<h2>Home agent</h2>
+{{with .Agent}}
+<p>A home agent is a small program on your own always-on PC. It opens pages in your installed Chrome or Edge from your home connection and reports what it sees, so sites that block servers can still be watched. Last report received: <strong>{{.LastSeen}}</strong>.</p>
+{{if .Tokens}}<div class="tablewrap"><table>
+<thead><tr><th>Name</th><th>Created</th><th>Last seen</th><th></th></tr></thead>
+<tbody>{{range .Tokens}}<tr><td data-label="Name">{{.Label}}</td><td data-label="Created">{{.Created}}</td><td data-label="Last seen">{{.LastSeen}}</td>
+<td class="actions"><form method="post" action="/account/agent/{{.ID}}/rotate" class="inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button type="submit">Replace token</button></form>
+<form method="post" action="/account/agent/{{.ID}}/revoke" class="inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button type="submit" class="danger">Revoke</button></form></td></tr>{{end}}</tbody>
+</table></div>{{else}}<p>No token yet.</p>{{end}}
+{{if .CanAdd}}<form method="post" action="/account/agent/create" class="stack">
+  <input type="hidden" name="csrf" value="{{$.CSRF}}">
+  <label for="agentlabel">Name for this PC (optional)</label>
+  <input id="agentlabel" name="label" maxlength="40" placeholder="Home PC">
+  <button type="submit">Create agent token</button>
+</form>{{else}}<p class="hint">You have the maximum of {{.Max}} tokens. Revoke one to create another.</p>{{end}}
+{{end}}
+</section>
+
+<section class="card">
 <h2>Add a page to watch</h2>
 <form method="post" action="/watches" class="stack">
   <input type="hidden" name="csrf" value="{{.CSRF}}">
@@ -39,6 +58,9 @@
   <input id="target" name="target" inputmode="decimal" maxlength="15" placeholder="499.99" value="{{.Form.Target}}">
   <label for="interval">Check every</label>
   <select id="interval" name="interval">{{range .Intervals}}<option value="{{.Minutes}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}</select>
+  <label for="fetch">Fetch from</label>
+  <select id="fetch" name="fetch"><option value="server"{{if ne .Form.Fetch "agent"}} selected{{end}}>This server</option><option value="agent"{{if eq .Form.Fetch "agent"}} selected{{end}}>My home agent</option></select>
+  <p class="hint">{{with .Agent}}{{.Hosts}}{{end}} block servers and draw prices with JavaScript, so choose <em>My home agent</em> for them. This is a suggestion, not a rule. A home agent watch is never fetched by this server.</p>
   <details>
     <summary>Advanced: CSS selector</summary>
     <p class="hint">If the price is not found automatically, give the selector of the element that holds it, for example <code>.price-box .amount</code> or <code>[data-price]</code>. Supported: tag, <code>.class</code>, <code>#id</code>, <code>[attr]</code>, <code>[attr=value]</code>, descendant (space) and <code>&gt;</code>.</p>
@@ -57,7 +79,7 @@
 <tbody>
 {{range .Watches}}
 <tr>
-  <td data-label="Watch"><a href="/watches/{{.ID}}">{{.Title}}</a><br><span class="hint">{{.Host}}</span></td>
+  <td data-label="Watch"><a href="/watches/{{.ID}}">{{.Title}}</a><br><span class="hint">{{.Host}}{{if .FetchAgent}} · home agent{{end}}</span></td>
   <td data-label="Last price">{{.Price}}</td>
   <td data-label="Target">{{.Target}}</td>
   <td data-label="Last checked">{{.Checked}}</td>

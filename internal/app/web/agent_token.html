@@ -1,0 +1,9 @@
+{{define "content"}}
+<h1>Home agent token: {{.Heading}}</h1>
+<p><strong>Copy it now.</strong> It is shown once and cannot be recovered. Anyone holding it can read your agent watches and report prices for them: treat it like a password. If it leaks, revoke it on the dashboard.</p>
+<section class="card">
+<input readonly value="{{.Token}}" size="60" onclick="this.select()" aria-label="Agent token">
+<p class="hint">Server address for the agent: <code>{{.Link}}</code></p>
+</section>
+<p><a href="/">Back to the dashboard</a></p>
+{{end}}

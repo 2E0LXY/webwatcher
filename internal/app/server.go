@@ -50,11 +50,12 @@ type Server struct {
 	pages   map[string]*template.Template
 	bg      sync.WaitGroup // background login sends (tests wait on it)
 	plLimit *RateLimiter   // failed /p/ attempts per IP
+	agent   *agentAPI      // Home Agent API
 }
 
 func NewServer(cfg Config, store *Store, auth *Auth, msgr Messenger, clock Clock) (*Server, error) {
-	s := &Server{cfg: cfg, store: store, auth: auth, msgr: msgr, clock: clock, db: store.db, pages: map[string]*template.Template{}, plLimit: NewRateLimiter(20, time.Hour)}
-	for _, p := range []string{"login", "sent", "confirm", "dashboard", "watch", "account", "dev", "message", "notifications", "admin_users", "admin_link"} {
+	s := &Server{cfg: cfg, store: store, auth: auth, msgr: msgr, clock: clock, db: store.db, pages: map[string]*template.Template{}, plLimit: NewRateLimiter(20, time.Hour), agent: newAgentAPI(store, clock, cfg.BaseURL)}
+	for _, p := range []string{"login", "sent", "confirm", "dashboard", "watch", "account", "dev", "message", "notifications", "admin_users", "admin_link", "agent_token"} {
 		t, err := template.ParseFS(webFS, "web/layout.html", "web/"+p+".html")
 		if err != nil {
 			return nil, err
@@ -102,6 +103,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /hook/meta", s.handleMetaVerify)
 	mux.HandleFunc("POST /hook/meta", s.handleMetaPost)
 	mux.HandleFunc("POST /hook/twilio", s.handleTwilioPost)
+	s.registerAgent(mux)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /dev", s.handleDev)
 	mux.Handle("GET /static/", http.StripPrefix("/static/", s.staticHandler()))
@@ -302,6 +304,9 @@ type watchView struct {
 	Kept         bool // a check failed but the last valid price is still shown
 	BasisChanged bool
 	BasisNote    string
+	Fetch        string // server or agent
+	FetchAgent   bool
+	SuggestAgent bool // a site that usually needs the home agent, still fetched by the server
 }
 
 type histView struct{ Price, When, Method string }
@@ -310,6 +315,7 @@ type formVals struct {
 	URL, Label, Selector, Target string
 	Interval                     int
 	QueryKeys                    string // names of token-like query parameters; needs a confirmation tick
+	Fetch                        string // server or agent
 }
 
 type pageData struct {
@@ -345,6 +351,7 @@ type pageData struct {
 	MaxUsers    int
 	AdminRows   []adminRow
 	AdminEvents []adminEventView
+	Agent       *agentCard
 }
 
 type notifView struct {
@@ -594,9 +601,13 @@ func (s *Server) renderDashboard(w http.ResponseWriter, r *http.Request, sess *S
 	d := pageData{Title: "Dashboard", UserID: sess.UserID, Phone: sess.Phone, CSRF: sess.CSRF, LoggedIn: true, Form: f, Error: errMsg,
 		Flash: flashes[r.URL.Query().Get("m")], Intervals: intervalOpts(f.Interval), Count: len(ws), Cap: MaxWatchesPerUser,
 		AlertsOn: sess.AlertsEnabled, Consented: sess.ConsentAt != nil, PL: s.personalLinkView(sess.UserID)}
+	modes, _ := s.store.FetchModes(sess.UserID)
 	for _, x := range ws {
-		d.Watches = append(d.Watches, s.view(x))
+		v := s.view(x)
+		s.decorateAgentView(&v, x, modes[x.ID])
+		d.Watches = append(d.Watches, v)
 	}
+	d.Agent = s.agentCardFor(sess.UserID)
 	if b, err := s.store.LatestUnread(sess.UserID); err == nil {
 		v := s.notifView(b)
 		d.Banner = &v
@@ -636,6 +647,7 @@ func (s *Server) handleAddWatch(w http.ResponseWriter, r *http.Request, sess *Se
 	f := formVals{
 		URL: strings.TrimSpace(r.PostFormValue("url")), Label: strings.TrimSpace(r.PostFormValue("label")),
 		Selector: strings.TrimSpace(r.PostFormValue("selector")), Target: strings.TrimSpace(r.PostFormValue("target")),
+		Fetch: r.PostFormValue("fetch"),
 	}
 	iv, ok := parseInterval(r.PostFormValue("interval"))
 	if !ok {
@@ -669,7 +681,7 @@ func (s *Server) handleAddWatch(w http.ResponseWriter, r *http.Request, sess *Se
 		fail(capitalise(err.Error()) + ".")
 		return
 	}
-	_, err = s.store.AddWatch(Watch{UserID: sess.UserID, URL: clean, Label: f.Label, Selector: f.Selector, TargetPence: target, IntervalMin: iv})
+	id, err := s.store.AddWatch(Watch{UserID: sess.UserID, URL: clean, Label: f.Label, Selector: f.Selector, TargetPence: target, IntervalMin: iv})
 	if err == ErrWatchCap {
 		fail(fmt.Sprintf("You can watch at most %d pages. Delete one first.", MaxWatchesPerUser))
 		return
@@ -678,6 +690,9 @@ func (s *Server) handleAddWatch(w http.ResponseWriter, r *http.Request, sess *Se
 		slog.Error("add watch", "err", RedactPII(err.Error()))
 		fail("Could not save the watch.")
 		return
+	}
+	if err := s.applyFetchChoice(r, sess.UserID, id); err != nil {
+		slog.Error("set fetch mode", "err", RedactPII(err.Error()))
 	}
 	http.Redirect(w, r, "/?m=added", http.StatusSeeOther)
 }
@@ -711,6 +726,8 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request, sess *Sessi
 
 func (s *Server) renderWatch(w http.ResponseWriter, status int, sess *Session, wt *Watch, errMsg, flash string) {
 	v := s.view(wt)
+	mode, _ := s.store.FetchModeOf(wt.ID)
+	s.decorateAgentView(&v, wt, mode)
 	hist, _ := s.store.History(wt.UserID, wt.ID, 100)
 	d := pageData{Title: v.Title, UserID: sess.UserID, Phone: sess.Phone, CSRF: sess.CSRF, LoggedIn: true, W: &v, Error: errMsg, Flash: flash,
 		Intervals: intervalOpts(wt.IntervalMin)}
@@ -742,6 +759,10 @@ func (s *Server) handleEditWatch(w http.ResponseWriter, r *http.Request, sess *S
 		}
 	}
 	if err := s.store.SetInterval(sess.UserID, wt.ID, iv); err != nil {
+		s.message(w, r, 500, "Error", "Could not save.")
+		return
+	}
+	if err := s.applyFetchChoice(r, sess.UserID, wt.ID); err != nil {
 		s.message(w, r, 500, "Error", "Could not save.")
 		return
 	}

@@ -213,3 +213,13 @@ func AgentOffline(w *Watch, now int64) bool {
 
 // agentHost is the lower-case hostname of a watch URL.
 func agentHost(raw string) string { return strings.ToLower(hostOf(raw)) }
+
+// FetchModeOf returns the fetch mode of one watch.
+func (s *Store) FetchModeOf(id int64) (string, error) {
+	var m string
+	err := s.db.QueryRow(`SELECT fetch_mode FROM watches WHERE id=?`, id).Scan(&m)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return m, err
+}
