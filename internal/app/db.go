@@ -157,6 +157,17 @@ var migrations = []string{
 		last_used_at INTEGER,
 		revoked_at INTEGER
 	);`,
+	`ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0;
+	ALTER TABLE users ADD COLUMN display_name TEXT NOT NULL DEFAULT '';
+	ALTER TABLE users ADD COLUMN disabled_at INTEGER;
+	CREATE TABLE admin_events (
+		id INTEGER PRIMARY KEY,
+		at INTEGER NOT NULL,
+		actor_id INTEGER NOT NULL,
+		action TEXT NOT NULL,
+		target_id INTEGER,
+		target_label TEXT NOT NULL DEFAULT ''
+	);`,
 }
 
 // OpenDB opens (creating if needed) the SQLite database in dir and migrates it.

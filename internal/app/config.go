@@ -38,6 +38,7 @@ type Config struct {
 	RespectRobots     bool   // WW_RESPECT_ROBOTS=1: opt-in robots.txt checks (default off)
 	SendBudget        int    // global outbound alert messages per hour
 	SessionDays       int    // WW_SESSION_DAYS: login session lifetime (default 30)
+	MaxUsers          int    // WW_MAX_USERS: account cap for the admin page (default 25)
 	WAAppSecret       string // Meta webhook HMAC secret
 	WAVerifyToken     string // Meta webhook GET verification token
 
@@ -104,6 +105,14 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 			return c, fmt.Errorf("WW_SESSION_DAYS must be a whole number of days from 1 to 365, got %q", v)
 		}
 		c.SessionDays = n
+	}
+	c.MaxUsers = DefaultMaxUsers
+	if v := strings.TrimSpace(getenv("WW_MAX_USERS")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 10000 {
+			return c, fmt.Errorf("WW_MAX_USERS must be a whole number from 1 to 10000, got %q", v)
+		}
+		c.MaxUsers = n
 	}
 	c.RespectRobots = getenv("WW_RESPECT_ROBOTS") == "1"
 	c.SendBudget = 200

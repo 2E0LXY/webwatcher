@@ -54,6 +54,7 @@ type Session struct {
 	CSRF          string
 	AlertsEnabled bool
 	ConsentAt     *int64
+	IsAdmin       bool
 }
 
 // CreateLoginToken stores only the hash of a single-use login token.
@@ -144,6 +145,13 @@ func (s *Store) ConsumeLoginToken(hash string) (int64, string, error) {
 	if err != nil {
 		return 0, "", err
 	}
+	var disabled *int64
+	if err := tx.QueryRow(`SELECT disabled_at FROM users WHERE id=?`, uid).Scan(&disabled); err != nil {
+		return 0, "", err
+	}
+	if disabled != nil {
+		return 0, "", ErrInvalidToken
+	}
 	return uid, phone, tx.Commit()
 }
 
@@ -156,10 +164,10 @@ func (s *Store) CreateSession(uid int64, hash, csrf string, ttl time.Duration) e
 
 func (s *Store) SessionByHash(hash string) (*Session, error) {
 	var x Session
-	var ae int
-	err := s.db.QueryRow(`SELECT s.user_id, u.phone, s.csrf, u.alerts_enabled, u.consent_at FROM sessions s JOIN users u ON u.id=s.user_id
-		WHERE s.token_hash=? AND s.expires_at>?`, hash, s.now()).Scan(&x.UserID, &x.Phone, &x.CSRF, &ae, &x.ConsentAt)
-	x.AlertsEnabled = ae != 0
+	var ae, adm int
+	err := s.db.QueryRow(`SELECT s.user_id, u.phone, s.csrf, u.alerts_enabled, u.consent_at, u.is_admin FROM sessions s JOIN users u ON u.id=s.user_id
+		WHERE s.token_hash=? AND s.expires_at>? AND u.disabled_at IS NULL`, hash, s.now()).Scan(&x.UserID, &x.Phone, &x.CSRF, &ae, &x.ConsentAt, &adm)
+	x.AlertsEnabled, x.IsAdmin = ae != 0, adm != 0
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -437,7 +445,7 @@ func (s *Store) WatchByID(id, uid int64) (*Watch, error) {
 
 func (s *Store) DueWatches(limit int) ([]*Watch, error) {
 	rows, err := s.db.Query(`SELECT `+s.watchCols()+` FROM watches w JOIN users u ON u.id=w.user_id
-		WHERE w.paused=0 AND w.failures<? AND w.next_check_at<=? ORDER BY w.next_check_at LIMIT ?`, MaxFailures, s.now(), limit)
+		WHERE u.disabled_at IS NULL AND w.paused=0 AND w.failures<? AND w.next_check_at<=? ORDER BY w.next_check_at LIMIT ?`, MaxFailures, s.now(), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -860,7 +868,7 @@ func (s *Store) PersonalLinkStatus(uid int64) (PersonalLinkInfo, error) {
 func (s *Store) UsePersonalLink(hash string) (int64, error) {
 	var uid int64
 	var stored string
-	err := s.db.QueryRow(`SELECT user_id, token_hash FROM personal_links WHERE token_hash=? AND revoked_at IS NULL`, hash).Scan(&uid, &stored)
+	err := s.db.QueryRow(`SELECT p.user_id, p.token_hash FROM personal_links p JOIN users u ON u.id=p.user_id WHERE p.token_hash=? AND p.revoked_at IS NULL AND u.disabled_at IS NULL`, hash).Scan(&uid, &stored)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && !ctEqual(stored, hash)) {
 		return 0, ErrInvalidToken
 	}

@@ -2,6 +2,7 @@ package app
 
 import (
 	"bufio"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // DefaultEnvFile is the systemd EnvironmentFile the installer creates.
@@ -227,43 +229,74 @@ func checkDir(dir string, line func(level, format string, a ...any)) {
 	}
 }
 
+// geteuid is replaced in tests to exercise the root refusal.
+var geteuid = os.Geteuid
+
+// cliEnv is the shared set-up of the operator commands that touch the database.
+type cliEnv struct {
+	db    *sql.DB
+	store *Store
+	phone string
+	base  string
+	https bool
+	dash  bool
+}
+
+func (c *cliEnv) Close() { c.db.Close() }
+
+// openCLI validates the number and WW_BASE_URL, refuses to run as root (it would
+// create database files the service cannot open) and opens the database.
+func openCLI(getenv func(string) string, cmd, phone string, needBase bool) (*cliEnv, error) {
+	p, err := NormalisePhone(phone)
+	if err != nil {
+		return nil, err
+	}
+	base := strings.TrimRight(strings.TrimSpace(getenv("WW_BASE_URL")), "/")
+	u, err := url.Parse(base)
+	if needBase && (base == "" || err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https")) {
+		return nil, errors.New("WW_BASE_URL must be set to the public URL, for example https://watch.example.com")
+	}
+	if geteuid() == 0 && os.Getenv("WW_ALLOW_ROOT") != "1" {
+		return nil, errors.New("do not run " + cmd + " as root: it would create database files the service cannot open. Use: sudo -u webwatcher webwatcher " + cmd + " " + p)
+	}
+	db, err := OpenDB(orDefault(getenv("WW_DIR"), "./data"))
+	if err != nil {
+		return nil, fmt.Errorf("open database: %w", err)
+	}
+	c := &cliEnv{db: db, store: NewStore(db, SystemClock()), phone: p, base: base, dash: strings.ToLower(strings.TrimSpace(getenv("WW_MESSENGER"))) == "dashboard"}
+	c.https = u != nil && u.Scheme == "https"
+	return c, nil
+}
+
 // AddUser creates (or re-uses) the user for phone and prints a one-time
 // magic link to w. It talks to the database directly and is not reachable
 // over HTTP. Only WW_DIR, WW_BASE_URL and WW_MESSENGER are read.
 func AddUser(getenv func(string) string, phone string, w io.Writer) error {
-	return issueLink(getenv, phone, w, false)
+	return issueLink(getenv, phone, w, false, false)
+}
+
+// AddUserAdmin is AddUser with --admin: the account is also marked admin.
+func AddUserAdmin(getenv func(string) string, phone string, w io.Writer) error {
+	return issueLink(getenv, phone, w, false, true)
 }
 
 // LoginLink prints a fresh one-time login link for an existing user. It is
 // adduser for a number that must already have an account.
 func LoginLink(getenv func(string) string, phone string, w io.Writer) error {
-	return issueLink(getenv, phone, w, true)
+	return issueLink(getenv, phone, w, true, false)
 }
 
-func issueLink(getenv func(string) string, phone string, w io.Writer, mustExist bool) error {
+func issueLink(getenv func(string) string, phone string, w io.Writer, mustExist, admin bool) error {
 	cmd := "adduser"
 	if mustExist {
 		cmd = "loginlink"
 	}
-	p, err := NormalisePhone(phone)
+	c, err := openCLI(getenv, cmd, phone, true)
 	if err != nil {
 		return err
 	}
-	base := strings.TrimRight(strings.TrimSpace(getenv("WW_BASE_URL")), "/")
-	u, err := url.Parse(base)
-	if base == "" || err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
-		return errors.New("WW_BASE_URL must be set to the public URL, for example https://watch.example.com")
-	}
-	if os.Geteuid() == 0 && os.Getenv("WW_ALLOW_ROOT") != "1" {
-		return errors.New("do not run " + cmd + " as root: it would create database files the service cannot open. Use: sudo -u webwatcher webwatcher " + cmd + " " + p)
-	}
-	dir := orDefault(getenv("WW_DIR"), "./data")
-	db, err := OpenDB(dir)
-	if err != nil {
-		return fmt.Errorf("open database: %w", err)
-	}
-	defer db.Close()
-	st := NewStore(db, SystemClock())
+	defer c.Close()
+	p, st := c.phone, c.store
 	if mustExist {
 		ok, err := st.UserExists(p)
 		if err != nil {
@@ -273,10 +306,18 @@ func issueLink(getenv func(string) string, phone string, w io.Writer, mustExist 
 			return fmt.Errorf("no user with number %s; create the account with: webwatcher adduser %s", MaskPhone(p), p)
 		}
 	}
-	dash := strings.ToLower(strings.TrimSpace(getenv("WW_MESSENGER"))) == "dashboard"
+	if admin {
+		uid, err := st.EnsureUser(p, c.dash)
+		if err != nil {
+			return err
+		}
+		if err := st.SetAdmin(uid, true); err != nil {
+			return err
+		}
+	}
 	raw, hash := newToken()
 	consent := fmt.Sprintf("consent recorded as %q", ConsentAdminCreated)
-	if dash {
+	if c.dash {
 		err = st.CreateDashboardLoginToken(p, hash, LoginTokenTTL)
 		consent = fmt.Sprintf("source %q, no WhatsApp consent recorded", ConsentDashboard)
 	} else {
@@ -285,9 +326,121 @@ func issueLink(getenv func(string) string, phone string, w io.Writer, mustExist 
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(w, "One-time login link for %s (valid 15 minutes, works once; %s):\n\n%s/auth/%s\n\n", MaskPhone(p), consent, base, raw)
-	if u.Scheme != "https" {
+	fmt.Fprintf(w, "One-time login link for %s (valid 15 minutes, works once; %s):\n\n%s/auth/%s\n\n", MaskPhone(p), consent, c.base, raw)
+	if admin {
+		fmt.Fprintln(w, "This account is an admin.")
+	}
+	if !c.https {
 		fmt.Fprintln(w, "Note: WW_BASE_URL is not https; production requires https.")
 	}
+	return nil
+}
+
+// PermalinkOpts selects what `webwatcher permalink` does.
+type PermalinkOpts struct {
+	Revoke bool // revoke the permanent link
+	Status bool // print created/last used, never the token
+	Admin  bool // also mark the account admin (create/rotate only)
+}
+
+// Permalink creates or rotates the permanent personal login link for a number
+// (creating the account if absent), revokes it, or prints its status. The token
+// is printed once, on creation, and only its hash is stored.
+func Permalink(getenv func(string) string, phone string, o PermalinkOpts, w io.Writer) error {
+	if o.Revoke && o.Status {
+		return errors.New("use only one of --revoke and --show-status")
+	}
+	c, err := openCLI(getenv, "permalink", phone, !o.Revoke && !o.Status)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	st, p := c.store, c.phone
+	switch {
+	case o.Revoke, o.Status:
+		uid, err := st.UserID(p)
+		if err != nil {
+			return fmt.Errorf("no user with number %s", MaskPhone(p))
+		}
+		if o.Revoke {
+			ok, err := st.RevokePersonalLink(uid)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return fmt.Errorf("%s has no active permanent link", MaskPhone(p))
+			}
+			fmt.Fprintf(w, "Permanent link for %s revoked.\n", MaskPhone(p))
+			return nil
+		}
+		info, err := st.PersonalLinkStatus(uid)
+		if err != nil {
+			return err
+		}
+		stamp := func(t time.Time) string { return t.In(london).Format("2 Jan 2006 15:04 MST") }
+		switch {
+		case info.CreatedAt.IsZero():
+			fmt.Fprintf(w, "%s: no permanent link.\n", MaskPhone(p))
+		case info.RevokedAt != nil:
+			fmt.Fprintf(w, "%s: revoked %s (created %s).\n", MaskPhone(p), stamp(*info.RevokedAt), stamp(info.CreatedAt))
+		default:
+			last := "never"
+			if info.LastUsedAt != nil {
+				last = stamp(*info.LastUsedAt)
+			}
+			fmt.Fprintf(w, "%s: active. Created %s. Last used %s.\n", MaskPhone(p), stamp(info.CreatedAt), last)
+		}
+		return nil
+	}
+	uid, err := st.EnsureUser(p, c.dash)
+	if err != nil {
+		return err
+	}
+	if o.Admin {
+		if err := st.SetAdmin(uid, true); err != nil {
+			return err
+		}
+	}
+	raw, hash := newToken()
+	if err := st.SetPersonalLink(uid, hash); err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "Permanent login link for %s. It is shown once and cannot be recovered; running this command again replaces it.\nAnyone holding it has full access to the account: treat it like a password.\n\n%s/p/%s\n\n", MaskPhone(p), c.base, raw)
+	if o.Admin {
+		fmt.Fprintln(w, "This account is an admin.")
+	}
+	if !c.https {
+		fmt.Fprintln(w, "Note: WW_BASE_URL is not https; production requires https.")
+	}
+	return nil
+}
+
+// SetAdmin marks (or with revoke, unmarks) an account as admin, creating the
+// account when absent. Removing the last enabled admin is refused.
+func SetAdmin(getenv func(string) string, phone string, revoke bool, w io.Writer) error {
+	c, err := openCLI(getenv, "setadmin", phone, false)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	if revoke {
+		uid, err := c.store.UserID(c.phone)
+		if err != nil {
+			return fmt.Errorf("no user with number %s", MaskPhone(c.phone))
+		}
+		if err := c.store.SetAdmin(uid, false); err != nil {
+			return err
+		}
+		fmt.Fprintf(w, "%s is no longer an admin.\n", MaskPhone(c.phone))
+		return nil
+	}
+	uid, err := c.store.EnsureUser(c.phone, c.dash)
+	if err != nil {
+		return err
+	}
+	if err := c.store.SetAdmin(uid, true); err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "%s is an admin.\n", MaskPhone(c.phone))
 	return nil
 }

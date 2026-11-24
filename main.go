@@ -20,7 +20,7 @@ import (
 var version = "dev"
 
 func main() {
-	if len(os.Args) > 1 && (os.Args[1] == "doctor" || os.Args[1] == "adduser" || os.Args[1] == "loginlink") {
+	if len(os.Args) > 1 && (os.Args[1] == "doctor" || os.Args[1] == "adduser" || os.Args[1] == "loginlink" || os.Args[1] == "permalink" || os.Args[1] == "setadmin") {
 		os.Exit(subcommand(os.Args[1], os.Args[2:]))
 	}
 	showVersion := flag.Bool("version", false, "print version and exit")
@@ -139,11 +139,14 @@ func run() error {
 	return nil
 }
 
-// subcommand runs the operator commands `doctor`, `adduser` and `loginlink` and returns the
+// subcommand runs the operator commands `doctor`, `adduser`, `loginlink`, `permalink` and `setadmin` and returns the
 // process exit status. Both read the same settings as the service.
 func subcommand(name string, args []string) int {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	envFile := fs.String("env", "", "read settings from this file instead of the environment (default: the environment, else "+app.DefaultEnvFile+")")
+	revoke := fs.Bool("revoke", false, "permalink/setadmin: revoke instead of create")
+	status := fs.Bool("show-status", false, "permalink: print status, never the token")
+	admin := fs.Bool("admin", false, "adduser/permalink: also mark the account admin")
 	// Allow the phone number before or after flags.
 	var rest []string
 	for len(args) > 0 {
@@ -179,12 +182,34 @@ func subcommand(name string, args []string) int {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			return 1
 		}
+	case "permalink":
+		if len(rest) != 1 {
+			fmt.Fprintln(os.Stderr, "usage: webwatcher permalink [-env FILE] [--revoke | --show-status] [--admin] +447700900123")
+			return 2
+		}
+		if err := app.Permalink(getenv, rest[0], app.PermalinkOpts{Revoke: *revoke, Status: *status, Admin: *admin}, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			return 1
+		}
+	case "setadmin":
+		if len(rest) != 1 {
+			fmt.Fprintln(os.Stderr, "usage: webwatcher setadmin [-env FILE] [--revoke] +447700900123")
+			return 2
+		}
+		if err := app.SetAdmin(getenv, rest[0], *revoke, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			return 1
+		}
 	case "adduser":
 		if len(rest) != 1 {
 			fmt.Fprintln(os.Stderr, "usage: webwatcher adduser [-env FILE] +447700900123")
 			return 2
 		}
-		if err := app.AddUser(getenv, rest[0], os.Stdout); err != nil {
+		add := app.AddUser
+		if *admin {
+			add = app.AddUserAdmin
+		}
+		if err := add(getenv, rest[0], os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			return 1
 		}
