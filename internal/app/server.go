@@ -281,33 +281,53 @@ type intervalOpt struct {
 }
 
 type watchView struct {
-	ID           int64
-	Title        string
-	URL          string
-	Host         string
-	Price        string
-	Checked      string
-	Status       string // css class: ok, pending, blocked, error, paused, stopped
-	StatusTxt    string
-	Reason       string
-	Target       string
-	TargetVal    string
-	Method       string
-	Interval     string
-	Paused       bool
-	Stopped      bool
-	Selector     string
-	Failures     int
-	SoldOut      bool
-	Kept         bool // a check failed but the last valid price is still shown
-	BasisChanged bool
-	BasisNote    string
+	ID               int64
+	Title            string
+	URL              string
+	Host             string
+	Price            string
+	Checked          string
+	Status           string // css class: ok, pending, blocked, error, paused, stopped
+	StatusTxt        string
+	Reason           string
+	Target           string
+	TargetVal        string
+	Method           string
+	Interval         string
+	Paused           bool
+	Stopped          bool
+	Selector         string
+	Failures         int
+	SoldOut          bool
+	Kept             bool // a check failed but the last valid price is still shown
+	BasisChanged     bool
+	BasisNote        string
+	CurrencyMismatch bool
+	MismatchNote     string
+	TargetCurrency   string
+}
+
+type curOpt struct {
+	Code     string
+	Selected bool
+}
+
+func currencyOpts(sel string) []curOpt {
+	if !validTargetCurrency(sel) {
+		sel = DefaultCurrency
+	}
+	var out []curOpt
+	for _, c := range TargetCurrencies {
+		out = append(out, curOpt{c, c == sel})
+	}
+	return out
 }
 
 type histView struct{ Price, When, Method string }
 
 type formVals struct {
 	URL, Label, Selector, Target string
+	TargetCurrency               string
 	Interval                     int
 	QueryKeys                    string // names of token-like query parameters; needs a confirmation tick
 }
@@ -326,6 +346,7 @@ type pageData struct {
 	W           *watchView
 	History     []histView
 	Intervals   []intervalOpt
+	Currencies  []curOpt
 	Count       int
 	Cap         int
 	Msgs        []devMsg
@@ -435,13 +456,22 @@ func (s *Server) view(w *Watch) watchView {
 		v.Price = FormatPence(*w.LastPricePence, w.Currency)
 	}
 	if w.TargetPence != nil {
-		v.Target = FormatPence(*w.TargetPence, w.Currency)
+		v.Target = FormatPence(*w.TargetPence, w.TargetCurrency)
 		v.TargetVal = fmt.Sprintf("%d.%02d", *w.TargetPence/100, *w.TargetPence%100)
 	}
 	if w.LastCheckedAt != nil {
 		v.Checked = time.Unix(*w.LastCheckedAt, 0).In(london).Format("2 Jan 2006, 15:04")
 	}
+	v.TargetCurrency = w.TargetCurrency
 	v.Stopped = w.Failures >= MaxFailures
+	if w.CurrencyMismatch && w.TargetPence != nil {
+		v.CurrencyMismatch = true
+		obsCur := w.Currency
+		if w.BasisChanged && w.ObsCurrency != "" {
+			obsCur = w.ObsCurrency
+		}
+		v.MismatchNote = fmt.Sprintf("Currency mismatch: your target is in %s but the page shows %s. The price is recorded but not compared with your target, so no below-target alert can fire. Change the target currency, or choose a page that shows %s.", w.TargetCurrency, obsCur, w.TargetCurrency)
+	}
 	v.SoldOut = w.SoldOut
 	v.Kept = w.LastPricePence != nil && (w.Status == "error" || w.Status == "noprice")
 	if w.LastPricePence != nil {
@@ -459,6 +489,8 @@ func (s *Server) view(w *Watch) watchView {
 		v.Status, v.StatusTxt = "stopped", "Stopped after 10 failed checks"
 	case w.BasisChanged:
 		v.Status, v.StatusTxt = "error", "Basis changed"
+	case v.CurrencyMismatch:
+		v.Status, v.StatusTxt = "error", "Currency mismatch"
 	case w.SoldOut:
 		v.Status, v.StatusTxt = "paused", "Sold out"
 	case w.Status == "blocked":
@@ -592,7 +624,7 @@ func (s *Server) renderDashboard(w http.ResponseWriter, r *http.Request, sess *S
 		return
 	}
 	d := pageData{Title: "Dashboard", UserID: sess.UserID, Phone: sess.Phone, CSRF: sess.CSRF, LoggedIn: true, Form: f, Error: errMsg,
-		Flash: flashes[r.URL.Query().Get("m")], Intervals: intervalOpts(f.Interval), Count: len(ws), Cap: MaxWatchesPerUser,
+		Flash: flashes[r.URL.Query().Get("m")], Intervals: intervalOpts(f.Interval), Currencies: currencyOpts(f.TargetCurrency), Count: len(ws), Cap: MaxWatchesPerUser,
 		AlertsOn: sess.AlertsEnabled, Consented: sess.ConsentAt != nil, PL: s.personalLinkView(sess.UserID)}
 	for _, x := range ws {
 		d.Watches = append(d.Watches, s.view(x))
@@ -636,12 +668,16 @@ func (s *Server) handleAddWatch(w http.ResponseWriter, r *http.Request, sess *Se
 	f := formVals{
 		URL: strings.TrimSpace(r.PostFormValue("url")), Label: strings.TrimSpace(r.PostFormValue("label")),
 		Selector: strings.TrimSpace(r.PostFormValue("selector")), Target: strings.TrimSpace(r.PostFormValue("target")),
+		TargetCurrency: r.PostFormValue("target_currency"),
 	}
 	iv, ok := parseInterval(r.PostFormValue("interval"))
 	if !ok {
 		iv = DefaultIntervalMin
 	}
 	f.Interval = iv
+	if !validTargetCurrency(f.TargetCurrency) {
+		f.TargetCurrency = DefaultCurrency
+	}
 	fail := func(msg string) { s.renderDashboard(w, r, sess, http.StatusBadRequest, f, msg) }
 	clean, err := ValidateWatchURL(f.URL)
 	if err != nil {
@@ -669,7 +705,7 @@ func (s *Server) handleAddWatch(w http.ResponseWriter, r *http.Request, sess *Se
 		fail(capitalise(err.Error()) + ".")
 		return
 	}
-	_, err = s.store.AddWatch(Watch{UserID: sess.UserID, URL: clean, Label: f.Label, Selector: f.Selector, TargetPence: target, IntervalMin: iv})
+	_, err = s.store.AddWatch(Watch{UserID: sess.UserID, URL: clean, Label: f.Label, Selector: f.Selector, TargetPence: target, TargetCurrency: f.TargetCurrency, IntervalMin: iv})
 	if err == ErrWatchCap {
 		fail(fmt.Sprintf("You can watch at most %d pages. Delete one first.", MaxWatchesPerUser))
 		return
@@ -713,7 +749,7 @@ func (s *Server) renderWatch(w http.ResponseWriter, status int, sess *Session, w
 	v := s.view(wt)
 	hist, _ := s.store.History(wt.UserID, wt.ID, 100)
 	d := pageData{Title: v.Title, UserID: sess.UserID, Phone: sess.Phone, CSRF: sess.CSRF, LoggedIn: true, W: &v, Error: errMsg, Flash: flash,
-		Intervals: intervalOpts(wt.IntervalMin)}
+		Intervals: intervalOpts(wt.IntervalMin), Currencies: currencyOpts(wt.TargetCurrency)}
 	for _, h := range hist {
 		d.History = append(d.History, histView{FormatPence(h.PricePence, h.Currency) + basisSuffix(h.Basis), time.Unix(h.CheckedAt, 0).In(london).Format("2 Jan 2006, 15:04"), h.Method})
 	}
@@ -733,6 +769,13 @@ func (s *Server) handleEditWatch(w http.ResponseWriter, r *http.Request, sess *S
 	iv, ok := parseInterval(r.PostFormValue("interval"))
 	if !ok {
 		iv = wt.IntervalMin
+	}
+	if c := r.PostFormValue("target_currency"); validTargetCurrency(c) && c != wt.TargetCurrency {
+		if err := s.store.SetTargetCurrency(sess.UserID, wt.ID, c); err != nil {
+			s.message(w, r, 500, "Error", "Could not save.")
+			return
+		}
+		wt.TargetCurrency = c
 	}
 	same := (target == nil && wt.TargetPence == nil) || (target != nil && wt.TargetPence != nil && *target == *wt.TargetPence)
 	if !same {

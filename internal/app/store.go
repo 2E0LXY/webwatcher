@@ -23,6 +23,21 @@ const (
 	MaxFailures       = 10
 )
 
+// DefaultCurrency is the currency a target is in unless the user says otherwise.
+const DefaultCurrency = "GBP"
+
+// TargetCurrencies are the currencies a target can be set in.
+var TargetCurrencies = []string{"GBP", "EUR", "USD"}
+
+func validTargetCurrency(c string) bool {
+	for _, x := range TargetCurrencies {
+		if x == c {
+			return true
+		}
+	}
+	return false
+}
+
 // Store wraps the database. All SQL is parameterised.
 type Store struct {
 	db        *sql.DB
@@ -327,42 +342,44 @@ func (s *Store) DeleteUserSessions(uid int64) error {
 // ---- watches ----
 
 type Watch struct {
-	ID             int64
-	UserID         int64
-	URL            string
-	Label          string
-	Selector       string
-	TargetPence    *int64
-	IntervalMin    int
-	Paused         bool
-	Status         string
-	LastPricePence *int64
-	AlertBase      *int64
-	Currency       string
-	LastMethod     string
-	LastError      string
-	LastCheckedAt  *int64
-	NextCheckAt    int64
-	Failures       int
-	FailureNotif   bool
-	CreatedAt      int64
-	Phone          string // joined from users; set by DueWatches/WatchByID
-	AlertsOn       bool   // user has consented and not opted out
-	Basis          string // per_person, total or unknown: what LastPricePence is a price of
-	BasisChanged   bool   // a later observation had a different currency or basis; awaiting confirmation
-	ObsPence       *int64 // that observation
-	ObsCurrency    string
-	ObsBasis       string
-	SoldOut        bool
-	ETag           string
-	LastModified   string
-	Version        int64 // bumped on target, pause and basis edits; guards queued alerts against stale snapshots
+	ID               int64
+	UserID           int64
+	URL              string
+	Label            string
+	Selector         string
+	TargetPence      *int64
+	IntervalMin      int
+	Paused           bool
+	Status           string
+	LastPricePence   *int64
+	AlertBase        *int64
+	Currency         string
+	LastMethod       string
+	LastError        string
+	LastCheckedAt    *int64
+	NextCheckAt      int64
+	Failures         int
+	FailureNotif     bool
+	CreatedAt        int64
+	Phone            string // joined from users; set by DueWatches/WatchByID
+	AlertsOn         bool   // user has consented and not opted out
+	Basis            string // per_person, total or unknown: what LastPricePence is a price of
+	BasisChanged     bool   // a later observation had a different currency or basis; awaiting confirmation
+	ObsPence         *int64 // that observation
+	ObsCurrency      string
+	ObsBasis         string
+	SoldOut          bool
+	ETag             string
+	LastModified     string
+	Version          int64  // bumped on target, pause and basis edits; guards queued alerts against stale snapshots
+	TargetCurrency   string // the currency the target is expressed in (default GBP)
+	CurrencyMismatch bool   // the page shows a different currency from the target: below-target is not evaluated
 }
 
 const watchColsTpl = `w.id,w.user_id,w.url,w.label,w.selector,w.target_pence,w.interval_min,w.paused,w.status,
 	w.last_price_pence,w.alert_base_pence,w.currency,w.last_method,w.last_error,w.last_checked_at,
 	w.next_check_at,w.failures,w.failure_notified,w.created_at,u.phone,{ALLOWED},
-	w.basis,w.basis_changed,w.obs_price_pence,w.obs_currency,w.obs_basis,w.sold_out,w.etag,w.last_modified,w.version`
+	w.basis,w.basis_changed,w.obs_price_pence,w.obs_currency,w.obs_basis,w.sold_out,w.etag,w.last_modified,w.version,w.target_currency,w.currency_mismatch`
 
 func (s *Store) watchCols() string {
 	return strings.Replace(watchColsTpl, "{ALLOWED}", s.allowedSQL(), 1)
@@ -372,12 +389,13 @@ type rowScanner interface{ Scan(...any) error }
 
 func scanWatch(r rowScanner) (*Watch, error) {
 	var w Watch
-	var paused, fn, ao, bc, so int
+	var paused, fn, ao, bc, so, cm int
 	err := r.Scan(&w.ID, &w.UserID, &w.URL, &w.Label, &w.Selector, &w.TargetPence, &w.IntervalMin, &paused, &w.Status,
 		&w.LastPricePence, &w.AlertBase, &w.Currency, &w.LastMethod, &w.LastError, &w.LastCheckedAt,
 		&w.NextCheckAt, &w.Failures, &fn, &w.CreatedAt, &w.Phone, &ao,
-		&w.Basis, &bc, &w.ObsPence, &w.ObsCurrency, &w.ObsBasis, &so, &w.ETag, &w.LastModified, &w.Version)
+		&w.Basis, &bc, &w.ObsPence, &w.ObsCurrency, &w.ObsBasis, &so, &w.ETag, &w.LastModified, &w.Version, &w.TargetCurrency, &cm)
 	w.Paused, w.FailureNotif, w.AlertsOn, w.BasisChanged, w.SoldOut = paused != 0, fn != 0, ao != 0, bc != 0, so != 0
+	w.CurrencyMismatch = cm != 0
 	return &w, err
 }
 
@@ -401,9 +419,13 @@ func (s *Store) AddWatch(w Watch) (int64, error) {
 	if n >= MaxWatchesPerUser {
 		return 0, ErrWatchCap
 	}
+	tcur := w.TargetCurrency
+	if tcur == "" {
+		tcur = DefaultCurrency
+	}
 	now := s.now()
-	res, err := tx.Exec(`INSERT INTO watches(user_id,url,label,selector,target_pence,interval_min,status,next_check_at,created_at)
-		VALUES(?,?,?,?,?,?, 'pending', ?, ?)`, w.UserID, w.URL, w.Label, w.Selector, w.TargetPence, w.IntervalMin, now, now)
+	res, err := tx.Exec(`INSERT INTO watches(user_id,url,label,selector,target_pence,target_currency,interval_min,status,next_check_at,created_at)
+		VALUES(?,?,?,?,?,?,?, 'pending', ?, ?)`, w.UserID, w.URL, w.Label, w.Selector, w.TargetPence, tcur, w.IntervalMin, now, now)
 	if err != nil {
 		return 0, err
 	}
@@ -477,6 +499,12 @@ func (s *Store) exec1(uid, id int64, q string, args ...any) error {
 // check can raise a "below target" alert against the new target.
 func (s *Store) SetTarget(uid, id int64, target *int64) error {
 	return s.exec1(uid, id, `UPDATE watches SET target_pence=?, alert_base_pence=NULL, version=version+1`, target)
+}
+
+// SetTargetCurrency changes the currency the target is expressed in. Like a new
+// target, it resets the alert baseline.
+func (s *Store) SetTargetCurrency(uid, id int64, cur string) error {
+	return s.exec1(uid, id, `UPDATE watches SET target_currency=?, alert_base_pence=NULL, version=version+1`, cur)
 }
 
 func (s *Store) SetInterval(uid, id int64, mins int) error {
@@ -570,6 +598,8 @@ type Observation struct {
 	Basis        string
 	ETag         string
 	LastModified string
+	// CurrencyMismatch: the price is in a different currency from the watch's target.
+	CurrencyMismatch bool
 	// Version is the watch version the check started from. If the watch has
 	// been edited, paused or deleted since, the result is dropped (ErrStale).
 	Version *int64
@@ -599,8 +629,8 @@ func (s *Store) RecordObservation(id int64, o Observation, next int64, base *int
 	}
 	if _, err := tx.Exec(`UPDATE watches SET status='ok', last_price_pence=?, currency=?, basis=?, last_method=?, last_error='',
 		last_checked_at=?, next_check_at=?, failures=0, failure_notified=0, alert_base_pence=?, sold_out=0,
-		basis_changed=0, obs_price_pence=NULL, obs_currency='', obs_basis='', etag=?, last_modified=? WHERE id=?`,
-		price, cur, o.Basis, method, now, next, base, o.ETag, o.LastModified, id); err != nil {
+		basis_changed=0, obs_price_pence=NULL, obs_currency='', obs_basis='', etag=?, last_modified=?, currency_mismatch=? WHERE id=?`,
+		price, cur, o.Basis, method, now, next, base, o.ETag, o.LastModified, o.CurrencyMismatch, id); err != nil {
 		return err
 	}
 	if err := logCheck(tx, id, now, "ok", method); err != nil {
@@ -637,8 +667,8 @@ func (s *Store) RecordBasisChange(id int64, o Observation, next int64) error {
 		return err
 	}
 	if _, err := tx.Exec(`UPDATE watches SET status='ok', last_error='', last_method=?, last_checked_at=?, next_check_at=?,
-		failures=0, failure_notified=0, sold_out=0, basis_changed=1, obs_price_pence=?, obs_currency=?, obs_basis=?, etag=?, last_modified=? WHERE id=?`,
-		o.Method, now, next, o.Price, o.Currency, o.Basis, o.ETag, o.LastModified, id); err != nil {
+		failures=0, failure_notified=0, sold_out=0, basis_changed=1, obs_price_pence=?, obs_currency=?, obs_basis=?, etag=?, last_modified=?, currency_mismatch=? WHERE id=?`,
+		o.Method, now, next, o.Price, o.Currency, o.Basis, o.ETag, o.LastModified, o.CurrencyMismatch, id); err != nil {
 		return err
 	}
 	if err := logCheck(tx, id, now, "basis_changed", o.Method); err != nil {

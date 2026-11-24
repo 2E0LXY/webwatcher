@@ -138,6 +138,7 @@ func (s *Scheduler) onSuccess(ctx context.Context, w *Watch, res *Result) {
 		return
 	}
 	obs := Observation{Price: res.PricePence, Currency: res.Currency, Method: res.Method, Basis: res.Basis, ETag: res.ETag, LastModified: res.LastModified, Version: &w.Version}
+	obs.CurrencyMismatch = w.TargetPence != nil && obs.Currency != w.TargetCurrency
 	if obs.Basis == "" {
 		obs.Basis = BasisUnknown
 	}
@@ -157,7 +158,12 @@ func (s *Scheduler) onSuccess(ctx context.Context, w *Watch, res *Result) {
 		}
 		return
 	}
-	kind := EvaluateAlert(AlertInput{Prev: w.AlertBase, Cur: res.PricePence, Target: w.TargetPence})
+	// A price in another currency is never compared with the target.
+	target := w.TargetPence
+	if obs.CurrencyMismatch {
+		target = nil
+	}
+	kind := EvaluateAlert(AlertInput{Prev: w.AlertBase, Cur: res.PricePence, Target: target})
 	w.Currency = res.Currency
 	var qa *QueuedAlert
 	if kind != "" && w.AlertsOn {

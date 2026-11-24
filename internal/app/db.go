@@ -168,6 +168,8 @@ var migrations = []string{
 		target_id INTEGER,
 		target_label TEXT NOT NULL DEFAULT ''
 	);`,
+	`ALTER TABLE watches ADD COLUMN target_currency TEXT NOT NULL DEFAULT 'GBP';
+	ALTER TABLE watches ADD COLUMN currency_mismatch INTEGER NOT NULL DEFAULT 0;`,
 }
 
 // OpenDB opens (creating if needed) the SQLite database in dir and migrates it.

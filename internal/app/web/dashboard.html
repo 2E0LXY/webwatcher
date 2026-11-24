@@ -35,8 +35,10 @@
   {{if .Form.QueryKeys}}<label class="check"><input type="checkbox" name="confirm_query" value="1" required> I understand this URL contains what looks like a token or booking reference ({{.Form.QueryKeys}}) and that Webwatcher will store it and send it to the site</label>{{end}}
   <label for="label">Label (optional)</label>
   <input id="label" name="label" maxlength="80" placeholder="Majorca week in July" value="{{.Form.Label}}">
-  <label for="target">Target price in pounds (optional)</label>
+  <label for="target">Target price (optional)</label>
   <input id="target" name="target" inputmode="decimal" maxlength="15" placeholder="499.99" value="{{.Form.Target}}">
+  <label for="target_currency">Target currency</label>
+  <select id="target_currency" name="target_currency">{{range .Currencies}}<option value="{{.Code}}"{{if .Selected}} selected{{end}}>{{.Code}}</option>{{end}}</select>
   <label for="interval">Check every</label>
   <select id="interval" name="interval">{{range .Intervals}}<option value="{{.Minutes}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}</select>
   <details>
@@ -64,6 +66,7 @@
   <td data-label="Status"><span class="badge {{.Status}}">{{.StatusTxt}}</span>
     {{if .BasisChanged}}<br><span class="hint">{{.BasisNote}}</span>
     <form method="post" action="/watches/{{.ID}}/confirm-basis" class="inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button type="submit">Confirm new basis</button></form>{{end}}
+    {{if .CurrencyMismatch}}<br><span class="hint">Currency mismatch: the page is not in your target currency ({{.TargetCurrency}}), so the target is not evaluated.</span>{{end}}
     {{if eq .Status "blocked"}}<br><span class="hint">This site is blocking automated checks. Webwatcher does not try to get round bot protection, so try a different page.</span><br><span class="hint">{{.Reason}}</span>{{else if .Reason}}<br><span class="hint">{{.Reason}}{{if .Kept}}. Last valid price kept.{{end}}</span>{{end}}</td>
   <td class="actions">
     {{if .Paused}}
