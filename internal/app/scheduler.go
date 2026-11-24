@@ -202,7 +202,9 @@ func (s *Scheduler) onFailure(ctx context.Context, w *Watch, fail *CheckFailure)
 		delay = max(iv, 24*time.Hour) // robots.txt is cached for 24 hours anyway
 	}
 	delay = max(delay, fail.RetryAfter) // always honour Retry-After
-	next := s.clock.Now().Add(delay + s.jitter(delay)).Unix()
+	// Negative jitter must never undercut Retry-After.
+	total := max(delay+s.jitter(delay), fail.RetryAfter)
+	next := s.clock.Now().Add(total).Unix()
 	var notice *QueuedAlert
 	if failures >= MaxFailures && !w.FailureNotif && w.AlertsOn {
 		notice = &QueuedAlert{Kind: AlertFailed, Msg: BuildAlertMessage(AlertFailed, w, nil, 0, fail.Reason, s.baseURL)}
