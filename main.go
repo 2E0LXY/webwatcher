@@ -57,14 +57,16 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	sched := app.NewScheduler(store, app.NewHTTPFetcher(), msgr, clock, cfg.BaseURL)
+	sched := app.NewScheduler(store, app.NewHTTPFetcher(), clock, cfg.BaseURL)
+	sender := app.NewSender(store, msgr, clock, cfg.SendBudget)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
 	go func() { defer wg.Done(); sched.Run(ctx) }()
+	go func() { defer wg.Done(); sender.Run(ctx) }()
 	go func() { defer wg.Done(); app.RunMaintenance(ctx, db, store, cfg.Dir, clock) }()
 
 	hs := &http.Server{

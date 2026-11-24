@@ -390,7 +390,7 @@ func TestDashboardShowsBlockedNotice(t *testing.T) {
 	b := e.browser()
 	csrf := b.login("07700900123")
 	b.do("POST", "/watches", url.Values{"csrf": {csrf}, "url": {"https://www.jet2.com/x"}})
-	e.st.RecordFailure(1, "blocked", "blocked by site (HTTP 403)", 1, e.clk.Now().Unix()+3600)
+	e.st.RecordFailure(1, "blocked", "blocked by site (HTTP 403)", 1, e.clk.Now().Unix()+3600, nil)
 	page := b.do("GET", "/", nil).Body.String()
 	for _, s := range []string{"Blocked by site", "blocking automated checks", "does not try to get round bot protection", "blocked by site (HTTP 403)"} {
 		if !strings.Contains(page, s) {
@@ -404,7 +404,7 @@ func TestDeleteAccountViaHTTP(t *testing.T) {
 	b := e.browser()
 	csrf := b.login("07700900123")
 	b.do("POST", "/watches", url.Values{"csrf": {csrf}, "url": {"https://a.example.com/x"}})
-	e.st.RecordSuccess(1, 1000, "GBP", "regex", 0, nil)
+	e.st.RecordSuccess(1, 1000, "GBP", "regex", 0, nil, nil)
 	if w := b.do("POST", "/account/delete", url.Values{"csrf": {csrf}, "confirm": {"nope"}}); w.Code != 400 {
 		t.Fatalf("no confirmation: %d", w.Code)
 	}

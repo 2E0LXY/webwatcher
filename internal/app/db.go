@@ -85,6 +85,26 @@ var migrations = []string{
 		seen_at INTEGER NOT NULL,
 		PRIMARY KEY (provider, msg_id)
 	);`,
+	`CREATE TABLE outbox (
+		id INTEGER PRIMARY KEY,
+		user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		watch_id INTEGER NOT NULL REFERENCES watches(id) ON DELETE CASCADE,
+		kind TEXT NOT NULL,
+		price_pence INTEGER NOT NULL,
+		event_key TEXT NOT NULL UNIQUE,
+		text TEXT NOT NULL,
+		params TEXT NOT NULL,
+		status TEXT NOT NULL DEFAULT 'queued',
+		attempts INTEGER NOT NULL DEFAULT 0,
+		next_attempt_at INTEGER NOT NULL,
+		last_error TEXT NOT NULL DEFAULT '',
+		created_at INTEGER NOT NULL,
+		done_at INTEGER
+	);
+	CREATE INDEX outbox_due ON outbox(status, next_attempt_at);
+	CREATE INDEX outbox_user ON outbox(user_id);
+	CREATE TABLE send_log (at INTEGER NOT NULL);
+	CREATE INDEX send_log_at ON send_log(at);`,
 }
 
 // OpenDB opens (creating if needed) the SQLite database in dir and migrates it.

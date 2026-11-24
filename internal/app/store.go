@@ -2,7 +2,9 @@ package app
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -120,6 +122,11 @@ func (s *Store) DeleteUser(uid int64) error {
 	if _, err := tx.Exec(`DELETE FROM login_tokens WHERE phone=(SELECT phone FROM users WHERE id=?)`, uid); err != nil {
 		return err
 	}
+	for _, q := range []string{`DELETE FROM outbox WHERE user_id=?`, `DELETE FROM sessions WHERE user_id=?`} {
+		if _, err := tx.Exec(q, uid); err != nil {
+			return err
+		}
+	}
 	if _, err := tx.Exec(`DELETE FROM users WHERE id=?`, uid); err != nil {
 		return err
 	}
@@ -171,7 +178,12 @@ func setAlertsTx(tx *sql.Tx, where string, arg any, on bool) error {
 	if on {
 		v = 1
 	}
-	_, err = tx.Exec(`UPDATE users SET alerts_enabled=? WHERE id=?`, v, uid)
+	if _, err = tx.Exec(`UPDATE users SET alerts_enabled=? WHERE id=?`, v, uid); err != nil {
+		return err
+	}
+	if !on {
+		_, err = tx.Exec(`DELETE FROM outbox WHERE user_id=? AND status='queued'`, uid)
+	}
 	return err
 }
 
@@ -358,8 +370,13 @@ func (s *Store) SetPaused(uid, id int64, paused bool) error {
 	if paused {
 		return s.exec1(uid, id, `UPDATE watches SET paused=1`)
 	}
-	return s.exec1(uid, id, `UPDATE watches SET paused=0, failures=0, failure_notified=0,
-		status=CASE WHEN status IN ('blocked','error') THEN 'pending' ELSE status END, next_check_at=?`, s.now())
+	if err := s.exec1(uid, id, `UPDATE watches SET paused=0, failures=0, failure_notified=0,
+		status=CASE WHEN status IN ('blocked','error') THEN 'pending' ELSE status END, next_check_at=?`, s.now()); err != nil {
+		return err
+	}
+	// A fresh run of failures may send a fresh stop notice.
+	_, err := s.db.Exec(`DELETE FROM outbox WHERE watch_id=? AND kind=? AND status<>'queued'`, id, AlertFailed)
+	return err
 }
 
 func (s *Store) DeleteWatch(uid, id int64) error {
@@ -368,8 +385,37 @@ func (s *Store) DeleteWatch(uid, id int64) error {
 
 // ---- results ----
 
-// RecordSuccess stores a successful check, trims history and resets failures.
-func (s *Store) RecordSuccess(id int64, price int64, cur, method string, next int64, base *int64) error {
+// QueuedAlert is an alert to be written to the outbox in the same transaction
+// as the check result that caused it.
+type QueuedAlert struct {
+	Kind  string
+	Price int64
+	Msg   Message
+}
+
+// enqueueTx writes an alert to the outbox. The unique event key
+// (watch_id:kind:price_pence) makes a repeat of the same event a no-op. Older
+// finished alerts of the same kind at other prices are forgotten first, so a
+// price that oscillates (99 -> 105 -> 99 -> 105) can alert again.
+func enqueueTx(tx *sql.Tx, watchID int64, a *QueuedAlert, now int64) error {
+	if _, err := tx.Exec(`DELETE FROM outbox WHERE watch_id=? AND kind=? AND price_pence<>? AND status<>'queued'`,
+		watchID, a.Kind, a.Price); err != nil {
+		return err
+	}
+	params, _ := json.Marshal(a.Msg.Params)
+	key := fmt.Sprintf("%d:%s:%d", watchID, a.Kind, a.Price)
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO outbox(user_id,watch_id,kind,price_pence,event_key,text,params,next_attempt_at,created_at)
+		SELECT user_id,?,?,?,?,?,?,?,? FROM watches WHERE id=?`,
+		watchID, a.Kind, a.Price, key, a.Msg.Text, string(params), now, now, watchID); err != nil {
+		return err
+	}
+	_, err := tx.Exec(`INSERT INTO alerts_sent(watch_id,kind,price_pence,sent_at) VALUES(?,?,?,?)`, watchID, a.Kind, a.Price, now)
+	return err
+}
+
+// RecordSuccess stores a successful check, trims history, resets failures and,
+// if alert is non-nil, queues it in the outbox, all in one transaction.
+func (s *Store) RecordSuccess(id int64, price int64, cur, method string, next int64, base *int64, alert *QueuedAlert) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -389,23 +435,40 @@ func (s *Store) RecordSuccess(id int64, price int64, cur, method string, next in
 		(SELECT id FROM price_history WHERE watch_id=? ORDER BY id DESC LIMIT ?)`, id, id, HistoryCap); err != nil {
 		return err
 	}
+	if alert != nil {
+		if err := enqueueTx(tx, id, alert, now); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
 }
 
 // RecordFailure stores a failed check. status is one of error, blocked, stopped.
-func (s *Store) RecordFailure(id int64, status, reason string, failures int, next int64) error {
-	_, err := s.db.Exec(`UPDATE watches SET status=?, last_error=?, failures=?, last_checked_at=?, next_check_at=? WHERE id=?`,
-		status, reason, failures, s.now(), next, id)
-	return err
+// A non-nil notice is queued and the watch marked as notified, atomically.
+func (s *Store) RecordFailure(id int64, status, reason string, failures int, next int64, notice *QueuedAlert) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := s.now()
+	if _, err := tx.Exec(`UPDATE watches SET status=?, last_error=?, failures=?, last_checked_at=?, next_check_at=? WHERE id=?`,
+		status, reason, failures, now, next, id); err != nil {
+		return err
+	}
+	if notice != nil {
+		if err := enqueueTx(tx, id, notice, now); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE watches SET failure_notified=1 WHERE id=?`, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) Defer(id int64, next int64) error {
 	_, err := s.db.Exec(`UPDATE watches SET next_check_at=? WHERE id=?`, next, id)
-	return err
-}
-
-func (s *Store) MarkFailureNotified(id int64) error {
-	_, err := s.db.Exec(`UPDATE watches SET failure_notified=1 WHERE id=?`, id)
 	return err
 }
 

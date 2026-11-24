@@ -19,7 +19,6 @@ const DefaultIntervalMin = 60
 type Scheduler struct {
 	store   *Store
 	fetcher Fetcher
-	msgr    Messenger
 	clock   Clock
 	hosts   *HostLimiter
 	baseURL string
@@ -28,9 +27,9 @@ type Scheduler struct {
 	tick    time.Duration
 }
 
-func NewScheduler(store *Store, f Fetcher, m Messenger, clock Clock, baseURL string) *Scheduler {
+func NewScheduler(store *Store, f Fetcher, clock Clock, baseURL string) *Scheduler {
 	return &Scheduler{
-		store: store, fetcher: f, msgr: m, clock: clock, baseURL: baseURL,
+		store: store, fetcher: f, clock: clock, baseURL: baseURL,
 		hosts: NewHostLimiter(HostMinGap, clock),
 		sem:   make(chan struct{}, MaxConcurrent),
 		jitter: func(d time.Duration) time.Duration {
@@ -130,22 +129,23 @@ func (s *Scheduler) onSuccess(ctx context.Context, w *Watch, res *Result) {
 	lastBelow, _ := s.store.LastAlertPrice(w.ID, AlertBelow)
 	kind := EvaluateAlert(AlertInput{Prev: w.AlertBase, Cur: res.PricePence, Target: w.TargetPence, LastChanged: lastChanged, LastBelow: lastBelow})
 	w.Currency = res.Currency
-	base := &res.PricePence
-	if kind != "" {
-		msg := BuildAlertMessage(kind, w, w.AlertBase, res.PricePence, "", s.baseURL)
-		if err := s.msgr.Send(ctx, msg); err != nil {
-			// Keep the old baseline so the alert is retried at the next check.
-			slog.Error("alert not sent", "watch", w.ID, "kind", kind, "err", err)
-			base = w.AlertBase
-		} else if err := s.store.RecordAlert(w.ID, kind, res.PricePence); err != nil {
-			slog.Error("record alert", "watch", w.ID, "err", err)
-		}
+	var qa *QueuedAlert
+	if kind != "" && w.AlertsOn {
+		qa = &QueuedAlert{Kind: kind, Price: res.PricePence, Msg: BuildAlertMessage(kind, w, w.AlertBase, res.PricePence, "", s.baseURL)}
 	}
 	iv := s.interval(w)
 	next := s.clock.Now().Add(iv + s.jitter(iv)).Unix()
-	if err := s.store.RecordSuccess(w.ID, res.PricePence, res.Currency, res.Method, next, base); err != nil {
-		slog.Error("record success", "watch", w.ID, "err", err)
+	// The price update and its alert are committed together; the sender loop delivers it.
+	if err := s.store.RecordSuccess(w.ID, res.PricePence, res.Currency, res.Method, next, &res.PricePence, qa); err != nil {
+		slog.Error("record success", "watch", w.ID, "host", hostOf(w.URL), "err", err)
 	}
+}
+
+func hostOf(raw string) string {
+	if u, err := url.Parse(raw); err == nil {
+		return strings.ToLower(u.Hostname())
+	}
+	return ""
 }
 
 func (s *Scheduler) onFailure(ctx context.Context, w *Watch, fail *CheckFailure) {
@@ -159,16 +159,11 @@ func (s *Scheduler) onFailure(ctx context.Context, w *Watch, fail *CheckFailure)
 	}
 	delay = min(delay, limit)
 	next := s.clock.Now().Add(delay + s.jitter(delay)).Unix()
-	if err := s.store.RecordFailure(w.ID, fail.Status, fail.Reason, failures, next); err != nil {
-		slog.Error("record failure", "watch", w.ID, "err", err)
-		return
+	var notice *QueuedAlert
+	if failures >= MaxFailures && !w.FailureNotif && w.AlertsOn {
+		notice = &QueuedAlert{Kind: AlertFailed, Msg: BuildAlertMessage(AlertFailed, w, nil, 0, fail.Reason, s.baseURL)}
 	}
-	if failures >= MaxFailures && !w.FailureNotif {
-		msg := BuildAlertMessage(AlertFailed, w, nil, 0, fail.Reason, s.baseURL)
-		if err := s.msgr.Send(ctx, msg); err != nil {
-			slog.Error("failure notice not sent", "watch", w.ID, "err", err)
-			return // watch is stopped; the dashboard still shows why
-		}
-		s.store.MarkFailureNotified(w.ID)
+	if err := s.store.RecordFailure(w.ID, fail.Status, fail.Reason, failures, next, notice); err != nil {
+		slog.Error("record failure", "watch", w.ID, "host", hostOf(w.URL), "err", err)
 	}
 }

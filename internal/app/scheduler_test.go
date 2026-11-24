@@ -71,15 +71,16 @@ type schedEnv struct {
 	clk *fakeClock
 	f   *fakeFetcher
 	m   *fakeMessenger
+	snd *Sender
 	uid int64
 }
 
 func newSchedEnv(t *testing.T) *schedEnv {
 	st, clk := testStore(t)
 	f, m := newFakeFetcher(), &fakeMessenger{}
-	s := NewScheduler(st, f, m, clk, "https://ww.example")
+	s := NewScheduler(st, f, clk, "https://ww.example")
 	s.jitter = func(time.Duration) time.Duration { return 0 }
-	return &schedEnv{s, st, clk, f, m, mustUser(t, st, "+447700900123")}
+	return &schedEnv{s, st, clk, f, m, NewSender(st, m, clk, 200), mustUser(t, st, "+447700900123")}
 }
 
 func (e *schedEnv) add(t *testing.T, url string, target *int64, interval int) int64 {
@@ -92,7 +93,9 @@ func (e *schedEnv) add(t *testing.T, url string, target *int64, interval int) in
 
 func (e *schedEnv) run(t *testing.T, advance time.Duration) int {
 	e.clk.Advance(advance)
-	return e.s.RunDue(context.Background())
+	n := e.s.RunDue(context.Background())
+	e.snd.RunOnce(context.Background())
+	return n
 }
 
 func TestSchedulerChangeAndBelowTarget(t *testing.T) {
@@ -155,30 +158,6 @@ func TestSchedulerFirstCheckBelowTarget(t *testing.T) {
 	e.run(t, 0)
 	if s := e.m.Sent(); len(s) != 1 || !contains(s[0].Text, "below target") {
 		t.Fatalf("%+v", s)
-	}
-}
-
-func TestSchedulerSendFailureRetries(t *testing.T) {
-	e := newSchedEnv(t)
-	const u = "https://shop.example.com/p"
-	id := e.add(t, u, nil, 60)
-	e.f.set(u, pricePage(10000), pricePage(9000))
-	e.run(t, 0)
-	e.m.err = fmt.Errorf("boom")
-	e.run(t, time.Hour) // change detected, send fails
-	w, _ := e.st.WatchByID(id, e.uid)
-	if *w.AlertBase != 10000 || *w.LastPricePence != 9000 {
-		t.Fatalf("baseline should be kept for retry: base=%d last=%d", *w.AlertBase, *w.LastPricePence)
-	}
-	e.m.err = nil
-	e.run(t, time.Hour) // price still 9000 -> retried
-	sent := e.m.Sent()
-	if len(sent) != 2 || !contains(sent[1].Text, "£100.00 → £90.00") {
-		t.Fatalf("%+v", sent)
-	}
-	e.run(t, time.Hour)
-	if len(e.m.Sent()) != 2 {
-		t.Fatal("duplicate alert")
 	}
 }
 

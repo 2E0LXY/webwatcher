@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -30,6 +31,7 @@ type Config struct {
 	WATplLogin    string
 	WATplAlert    string
 	WALang        string
+	SendBudget    int    // global outbound alert messages per hour
 	WAAppSecret   string // Meta webhook HMAC secret
 	WAVerifyToken string // Meta webhook GET verification token
 
@@ -67,6 +69,14 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		TwFrom:         strings.TrimSpace(getenv("WW_TWILIO_FROM")),
 		TwContentLogin: strings.TrimSpace(getenv("WW_TWILIO_CONTENT_LOGIN")),
 		TwContentAlert: strings.TrimSpace(getenv("WW_TWILIO_CONTENT_ALERT")),
+	}
+	c.SendBudget = 200
+	if v := strings.TrimSpace(getenv("WW_SEND_BUDGET_PER_HOUR")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return c, fmt.Errorf("WW_SEND_BUDGET_PER_HOUR must be a positive whole number, got %q", v)
+		}
+		c.SendBudget = n
 	}
 	if c.BaseURL == "" {
 		c.BaseURL = "http://" + c.Addr

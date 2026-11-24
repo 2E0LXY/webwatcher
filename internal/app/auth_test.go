@@ -138,7 +138,7 @@ func TestDeleteUserErasesEverything(t *testing.T) {
 		t.Fatal(err)
 	}
 	otherW, _ := s.AddWatch(Watch{UserID: other, URL: "https://b.example/x", IntervalMin: 60})
-	s.RecordSuccess(id, 1000, "GBP", "jsonld", 0, nil)
+	s.RecordSuccess(id, 1000, "GBP", "jsonld", 0, nil, nil)
 	s.RecordAlert(id, "changed", 1000)
 	_, h := newToken()
 	s.CreateSession(uid, h, "c", time.Hour)
@@ -189,7 +189,7 @@ func TestHistoryCap(t *testing.T) {
 	uid := mustUser(t, s, "+447700900123")
 	id, _ := s.AddWatch(Watch{UserID: uid, URL: "https://a.example/x", IntervalMin: 60})
 	for i := 0; i < HistoryCap+25; i++ {
-		if err := s.RecordSuccess(id, int64(100+i), "GBP", "regex", 0, nil); err != nil {
+		if err := s.RecordSuccess(id, int64(100+i), "GBP", "regex", 0, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
