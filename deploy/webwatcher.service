@@ -14,8 +14,8 @@ RestartSec=5
 
 # State lives in /var/lib/webwatcher (WW_DIR=/var/lib/webwatcher in the env file)
 StateDirectory=webwatcher
-StateDirectoryMode=0750
-UMask=0027
+StateDirectoryMode=0700
+UMask=0077
 
 # Hardening
 NoNewPrivileges=yes
