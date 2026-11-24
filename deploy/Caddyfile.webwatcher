@@ -3,8 +3,9 @@
 watch.example.com {
 	encode zstd gzip
 
-	# Never write magic-link URLs (which contain the login token) to the access log.
-	@auth path /auth/*
+	# Never write login URLs (which contain a token) to the access log: one-time
+	# links (/auth/) and permanent personal links (/p/).
+	@auth path /auth/* /p/*
 	log_skip @auth
 
 	log {

@@ -14,6 +14,7 @@
   <nav>
     <a href="/">Dashboard</a>
     <a href="/notifications">Notifications <span class="count" id="unread"{{if not .Unread}} hidden{{end}}>{{.Unread}}</span></a>
+    {{if .IsAdmin}}<a href="/admin/users">Accounts</a>{{end}}
     <a href="/account">Account</a>
     <span class="who">{{.Phone}}</span>
     <form method="post" action="/logout" class="inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button type="submit" class="link">Log out</button></form>

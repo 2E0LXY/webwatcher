@@ -1,0 +1,41 @@
+{{define "content"}}
+<h1>Accounts</h1>
+<p>{{.Count}} of {{.MaxUsers}} accounts.</p>
+<section class="card">
+<h2>Add account</h2>
+<form method="post" action="/admin/users/add" class="stack">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <label for="phone">Phone number</label>
+  <input id="phone" name="phone" required maxlength="30" placeholder="+447700900123" autocomplete="off">
+  <label for="name">Display name (optional)</label>
+  <input id="name" name="name" maxlength="40" autocomplete="off">
+  <button type="submit">Add account</button>
+</form>
+</section>
+<section class="card tablewrap">
+<table>
+<thead><tr><th>Account</th><th>Created</th><th>Last login</th><th>Link</th><th>Watches</th><th>Alerts</th><th>Status</th><th>Actions</th></tr></thead>
+<tbody>
+{{range .AdminRows}}<tr>
+  <td>{{.Phone}}{{if .Name}} ({{.Name}}){{end}}{{if .IsAdmin}} <strong>admin</strong>{{end}}{{if .IsSelf}} (you){{end}}</td>
+  <td>{{.Created}}</td><td>{{.Login}}</td><td>{{if .HasLink}}{{.Link}}{{else}}none{{end}}</td><td>{{.Watches}}</td><td>{{.Alerts}}</td>
+  <td>{{if .Disabled}}disabled{{else}}enabled{{end}}</td>
+  <td>
+    {{if not .IsSelf}}<form method="post" action="/admin/users/{{.ID}}/link" class="inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button type="submit">{{if .HasLink}}Rotate link{{else}}Create link{{end}}</button></form>{{end}}
+    {{if .HasLink}}<form method="post" action="/admin/users/{{.ID}}/revoke-link" class="inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button type="submit">Revoke link</button></form>{{end}}
+    {{if not .IsSelf}}
+    <form method="post" action="/admin/users/{{.ID}}/{{if .Disabled}}enable{{else}}disable{{end}}" class="inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button type="submit">{{if .Disabled}}Enable{{else}}Disable{{end}}</button></form>
+    <form method="post" action="/admin/users/{{.ID}}/delete" class="inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><label class="check"><input type="checkbox" name="confirm" value="1" required> confirm</label> <button type="submit" class="danger">Delete</button></form>
+    {{end}}
+  </td>
+</tr>{{end}}
+</tbody></table>
+</section>
+<section class="card tablewrap">
+<h2>Audit log (last 50)</h2>
+<table>
+<thead><tr><th>When</th><th>Admin</th><th>Action</th><th>Account</th></tr></thead>
+<tbody>{{range .AdminEvents}}<tr><td>{{.When}}</td><td>{{.Actor}}</td><td>{{.Action}}</td><td>{{.Target}}</td></tr>{{else}}<tr><td colspan="4">Nothing yet.</td></tr>{{end}}</tbody>
+</table>
+</section>
+{{end}}

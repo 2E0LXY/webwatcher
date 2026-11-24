@@ -880,3 +880,9 @@ func (s *Store) UsePersonalLink(hash string) (int64, error) {
 	}
 	return uid, nil
 }
+
+// IsAdmin reports whether the user is an admin.
+func (s *Store) IsAdmin(uid int64) bool {
+	var a int
+	return s.db.QueryRow(`SELECT is_admin FROM users WHERE id=?`, uid).Scan(&a) == nil && a != 0
+}

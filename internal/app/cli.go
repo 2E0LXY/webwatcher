@@ -184,6 +184,10 @@ func Doctor(getenv func(string) string, w io.Writer) int {
 		line("WARN", "WW_BACKUP_KEY is not set (backups are written unencrypted, mode 0600)")
 	}
 
+	if c, err := LoadConfig(getenv); err == nil {
+		line("OK", "sessions last %d days (WW_SESSION_DAYS); up to %d accounts (WW_MAX_USERS)", c.SessionDays, c.MaxUsers)
+	}
+
 	// The authoritative check: exactly what the service does at start-up.
 	if _, err := LoadConfig(getenv); err != nil {
 		line("FAIL", "the service would NOT start: %s", err)

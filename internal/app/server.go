@@ -41,19 +41,20 @@ var london = func() *time.Location {
 
 // Server is the HTTP application.
 type Server struct {
-	cfg   Config
-	store *Store
-	auth  *Auth
-	msgr  Messenger
-	clock Clock
-	db    interface{ Ping() error }
-	pages map[string]*template.Template
-	bg    sync.WaitGroup // background login sends (tests wait on it)
+	cfg     Config
+	store   *Store
+	auth    *Auth
+	msgr    Messenger
+	clock   Clock
+	db      interface{ Ping() error }
+	pages   map[string]*template.Template
+	bg      sync.WaitGroup // background login sends (tests wait on it)
+	plLimit *RateLimiter   // failed /p/ attempts per IP
 }
 
 func NewServer(cfg Config, store *Store, auth *Auth, msgr Messenger, clock Clock) (*Server, error) {
-	s := &Server{cfg: cfg, store: store, auth: auth, msgr: msgr, clock: clock, db: store.db, pages: map[string]*template.Template{}}
-	for _, p := range []string{"login", "sent", "confirm", "dashboard", "watch", "account", "dev", "message", "notifications"} {
+	s := &Server{cfg: cfg, store: store, auth: auth, msgr: msgr, clock: clock, db: store.db, pages: map[string]*template.Template{}, plLimit: NewRateLimiter(20, time.Hour)}
+	for _, p := range []string{"login", "sent", "confirm", "dashboard", "watch", "account", "dev", "message", "notifications", "admin_users", "admin_link"} {
 		t, err := template.ParseFS(webFS, "web/layout.html", "web/"+p+".html")
 		if err != nil {
 			return nil, err
@@ -88,6 +89,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /notifications/count", s.withSession(s.handleNotificationCount))
 	mux.HandleFunc("POST /notifications/read-all", s.withSession(s.handleReadAll))
 	mux.HandleFunc("POST /notifications/{id}/read", s.withSession(s.handleReadOne))
+	mux.HandleFunc("GET /p/{token}", s.handlePersonalLink)
+	mux.HandleFunc("POST /account/personal-link/revoke", s.withSession(s.handleRevokeOwnLink))
+	mux.HandleFunc("GET /admin/users", s.withAdmin(s.handleAdminUsers))
+	mux.HandleFunc("POST /admin/users/add", s.withAdmin(s.handleAdminAdd))
+	mux.HandleFunc("POST /admin/users/{id}/link", s.withAdmin(s.handleAdminLink))
+	mux.HandleFunc("POST /admin/users/{id}/revoke-link", s.withAdmin(s.handleAdminRevoke))
+	mux.HandleFunc("POST /admin/users/{id}/disable", s.withAdmin(s.handleAdminDisable(true)))
+	mux.HandleFunc("POST /admin/users/{id}/enable", s.withAdmin(s.handleAdminDisable(false)))
+	mux.HandleFunc("POST /admin/users/{id}/delete", s.withAdmin(s.handleAdminDelete))
 	mux.HandleFunc("POST /account/alerts", s.withSession(s.handleToggleAlerts))
 	mux.HandleFunc("GET /hook/meta", s.handleMetaVerify)
 	mux.HandleFunc("POST /hook/meta", s.handleMetaPost)
@@ -156,6 +166,9 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 func logPath(r *http.Request) string {
 	if strings.HasPrefix(r.URL.Path, "/auth/") {
 		return "/auth/[token]"
+	}
+	if strings.HasPrefix(r.URL.Path, "/p/") {
+		return "/p/[redacted]"
 	}
 	return r.URL.Path
 }
@@ -300,32 +313,38 @@ type formVals struct {
 }
 
 type pageData struct {
-	Title     string
-	Phone     string
-	CSRF      string
-	Flash     string
-	Error     string
-	LoggedIn  bool
-	Dev       bool
-	Version   string
-	Form      formVals
-	Watches   []watchView
-	W         *watchView
-	History   []histView
-	Intervals []intervalOpt
-	Count     int
-	Cap       int
-	Msgs      []devMsg
-	Heading   string
-	Body      string
-	Token     string
-	AlertsOn  bool
-	Consented bool
-	UserID    int64 // set on logged-in pages so the header can show the unread badge
-	Dashboard bool  // WW_MESSENGER=dashboard
-	Unread    int
-	Banner    *notifView
-	Notifs    []notifView
+	Title       string
+	Phone       string
+	CSRF        string
+	Flash       string
+	Error       string
+	LoggedIn    bool
+	Dev         bool
+	Version     string
+	Form        formVals
+	Watches     []watchView
+	W           *watchView
+	History     []histView
+	Intervals   []intervalOpt
+	Count       int
+	Cap         int
+	Msgs        []devMsg
+	Heading     string
+	Body        string
+	Token       string
+	AlertsOn    bool
+	Consented   bool
+	UserID      int64 // set on logged-in pages so the header can show the unread badge
+	Dashboard   bool  // WW_MESSENGER=dashboard
+	Unread      int
+	Banner      *notifView
+	Notifs      []notifView
+	PL          plView
+	IsAdmin     bool
+	Link        string
+	MaxUsers    int
+	AdminRows   []adminRow
+	AdminEvents []adminEventView
 }
 
 type notifView struct {
@@ -346,6 +365,7 @@ func (s *Server) render(w http.ResponseWriter, status int, page string, d pageDa
 	d.Dashboard = s.dashboardOnly()
 	if d.LoggedIn && d.UserID != 0 {
 		d.Unread, _ = s.store.UnreadCount(d.UserID)
+		d.IsAdmin = s.store.IsAdmin(d.UserID)
 	}
 	var buf bytes.Buffer
 	if err := s.pages[page].ExecuteTemplate(&buf, "layout", d); err != nil {
@@ -368,7 +388,7 @@ func (s *Server) message(w http.ResponseWriter, r *http.Request, status int, hea
 
 var flashes = map[string]string{
 	"added": "Watch added. The first check happens within a minute or so.", "deleted": "Watch deleted.",
-	"saved": "Changes saved.", "confirmed": "New price basis confirmed. The baseline has been reset.", "alerts_on": "WhatsApp alerts are on.", "alerts_off": "WhatsApp alerts are off. You will get no more alert messages.", "read": "Marked as read.", "allread": "All notifications marked as read.", "paused": "Watch paused.", "resumed": "Watch resumed.",
+	"saved": "Changes saved.", "confirmed": "New price basis confirmed. The baseline has been reset.", "alerts_on": "WhatsApp alerts are on.", "alerts_off": "WhatsApp alerts are off. You will get no more alert messages.", "read": "Marked as read.", "allread": "All notifications marked as read.", "link_revoked": "Permanent link revoked.", "paused": "Watch paused.", "resumed": "Watch resumed.",
 }
 
 func intervalLabel(m int) string {
@@ -573,7 +593,7 @@ func (s *Server) renderDashboard(w http.ResponseWriter, r *http.Request, sess *S
 	}
 	d := pageData{Title: "Dashboard", UserID: sess.UserID, Phone: sess.Phone, CSRF: sess.CSRF, LoggedIn: true, Form: f, Error: errMsg,
 		Flash: flashes[r.URL.Query().Get("m")], Intervals: intervalOpts(f.Interval), Count: len(ws), Cap: MaxWatchesPerUser,
-		AlertsOn: sess.AlertsEnabled, Consented: sess.ConsentAt != nil}
+		AlertsOn: sess.AlertsEnabled, Consented: sess.ConsentAt != nil, PL: s.personalLinkView(sess.UserID)}
 	for _, x := range ws {
 		d.Watches = append(d.Watches, s.view(x))
 	}

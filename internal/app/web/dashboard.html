@@ -20,6 +20,13 @@
 </section>{{end}}
 
 <section class="card">
+<h2>Personal login link</h2>
+{{if .PL.Exists}}<p>A permanent link exists (created {{.PL.Created}}, last used {{.PL.Used}}). Anyone holding it can log in as you. It is created or replaced only from the command line. Revoke it if you think it has leaked.</p>
+<form method="post" action="/account/personal-link/revoke" class="inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button type="submit" class="danger">Revoke</button></form>
+{{else}}<p>No permanent link exists.</p>{{end}}
+</section>
+
+<section class="card">
 <h2>Add a page to watch</h2>
 <form method="post" action="/watches" class="stack">
   <input type="hidden" name="csrf" value="{{.CSRF}}">

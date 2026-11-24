@@ -1,0 +1,9 @@
+{{define "content"}}
+<h1>Permanent link for {{.Heading}}</h1>
+<p><strong>Copy it now.</strong> It is shown once and cannot be recovered. Creating a new link replaces this one. Anyone holding it has full access to the account: send it privately and treat it like a password.</p>
+<section class="card">
+<input readonly value="{{.Link}}" size="70" onclick="this.select()" aria-label="Permanent link">
+<pre>{{.Link}}</pre>
+</section>
+<p><a href="/admin/users">Back to accounts</a></p>
+{{end}}
