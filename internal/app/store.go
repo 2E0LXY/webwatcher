@@ -958,3 +958,48 @@ func (s *Store) RecentChecks(uid, watchID int64, limit int) ([]CheckInfo, error)
 	}
 	return out, rows.Err()
 }
+
+// MethodManual is the method recorded for a price the user typed in.
+const MethodManual = "manual"
+
+// RecordManual stores a price the user saw and typed in. It becomes the
+// watch's last price and alert baseline exactly like a fetched price, and an
+// alert, if one is due, is queued in the same transaction. It is not a check:
+// the failure state, status and schedule of the watch are left alone, so a
+// blocked page stays visibly blocked.
+func (s *Store) RecordManual(id int64, o Observation, alert *QueuedAlert) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := s.now()
+	alertsOK, err := s.guard(tx, id, o.Version)
+	if err != nil {
+		return err
+	}
+	if !alertsOK {
+		alert = nil
+	}
+	if _, err := tx.Exec(`UPDATE watches SET last_price_pence=?, currency=?, basis=?, last_method=?, alert_base_pence=?, sold_out=0,
+		currency_mismatch=? WHERE id=?`, o.Price, o.Currency, o.Basis, MethodManual, o.Price, o.CurrencyMismatch, id); err != nil {
+		return err
+	}
+	if err := logCheck(tx, id, now, "manual", MethodManual); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT INTO price_history(watch_id, price_pence, currency, basis, method, checked_at) VALUES(?,?,?,?,?,?)`,
+		id, o.Price, o.Currency, o.Basis, MethodManual, now); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM price_history WHERE watch_id=? AND id NOT IN
+		(SELECT id FROM price_history WHERE watch_id=? ORDER BY id DESC LIMIT ?)`, id, id, HistoryCap); err != nil {
+		return err
+	}
+	if alert != nil {
+		if err := enqueueTx(tx, id, alert, now); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}

@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -81,6 +82,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /watches/{id}/pause", s.withSession(s.handlePause(true)))
 	mux.HandleFunc("POST /watches/{id}/resume", s.withSession(s.handlePause(false)))
 	mux.HandleFunc("POST /watches/{id}/delete", s.withSession(s.handleDeleteWatch))
+	mux.HandleFunc("POST /watches/{id}/price", s.withSession(s.handleManualPrice))
 	mux.HandleFunc("POST /watches/{id}/confirm-basis", s.withSession(s.handleConfirmBasis))
 	mux.HandleFunc("GET /account", s.withSession(s.handleAccount))
 	mux.HandleFunc("POST /account/delete", s.withSession(s.handleDeleteAccount))
@@ -428,7 +430,7 @@ func (s *Server) message(w http.ResponseWriter, r *http.Request, status int, hea
 
 var flashes = map[string]string{
 	"added": "Watch added. The first check happens within a minute or so.", "deleted": "Watch deleted.",
-	"saved": "Changes saved.", "confirmed": "New price basis confirmed. The baseline has been reset.", "alerts_on": "WhatsApp alerts are on.", "alerts_off": "WhatsApp alerts are off. You will get no more alert messages.", "read": "Marked as read.", "allread": "All notifications marked as read.", "link_revoked": "Permanent link revoked.", "paused": "Watch paused.", "resumed": "Watch resumed.",
+	"saved": "Changes saved.", "recorded": "Price recorded. It is evaluated against your target like any other price.", "confirmed": "New price basis confirmed. The baseline has been reset.", "alerts_on": "WhatsApp alerts are on.", "alerts_off": "WhatsApp alerts are off. You will get no more alert messages.", "read": "Marked as read.", "allread": "All notifications marked as read.", "link_revoked": "Permanent link revoked.", "paused": "Watch paused.", "resumed": "Watch resumed.",
 }
 
 func intervalLabel(m int) string {
@@ -846,6 +848,51 @@ func (s *Server) handlePause(pause bool) sessHandler {
 		}
 		http.Redirect(w, r, dest, http.StatusSeeOther)
 	}
+}
+
+var manualPriceRe = regexp.MustCompile(`^[£€$]?\s*[0-9][0-9.,]*$`)
+
+// handleManualPrice records a price the user saw, for sites Webwatcher cannot read.
+func (s *Server) handleManualPrice(w http.ResponseWriter, r *http.Request, sess *Session) {
+	wt, ok := s.watchFromPath(w, r, sess)
+	if !ok {
+		return
+	}
+	pence, ok := parseAmount(strings.TrimSpace(r.PostFormValue("price")))
+	if raw := strings.TrimSpace(r.PostFormValue("price")); !ok || !manualPriceRe.MatchString(raw) || len(raw) > 15 || pence <= 0 || pence > 100_000_000 {
+		s.renderWatch(w, http.StatusBadRequest, sess, wt, "The price must be an amount such as 499.99.", "")
+		return
+	}
+	obs := manualObservation(wt, pence)
+	obs.Version = &wt.Version
+	qa := alertFor(wt, obs, s.cfg.BaseURL)
+	switch err := s.store.RecordManual(wt.ID, obs, qa); {
+	case errors.Is(err, ErrStale):
+		s.renderWatch(w, http.StatusConflict, sess, wt, "This watch is paused or has just changed. Resume it, then record the price again.", "")
+		return
+	case err != nil:
+		slog.Error("record manual price", "watch", wt.ID, "err", RedactPII(err.Error()))
+		s.message(w, r, 500, "Error", "Could not save.")
+		return
+	}
+	http.Redirect(w, r, fmt.Sprintf("/watches/%d?m=recorded", wt.ID), http.StatusSeeOther)
+}
+
+// manualObservation describes a typed-in price in the terms the watch already
+// tracks, so it is compared with them, not flagged as a different basis: the
+// same currency and price basis as the last price, or the target currency for
+// a watch with no price yet.
+func manualObservation(w *Watch, pence int64) Observation {
+	cur, basis := w.TargetCurrency, BasisUnknown
+	if w.LastPricePence != nil {
+		cur, basis = w.Currency, w.Basis
+	}
+	if basis == "" {
+		basis = BasisUnknown
+	}
+	o := Observation{Price: pence, Currency: cur, Method: MethodManual, Basis: basis}
+	o.CurrencyMismatch = w.TargetPence != nil && cur != w.TargetCurrency
+	return o
 }
 
 func (s *Server) handleConfirmBasis(w http.ResponseWriter, r *http.Request, sess *Session) {

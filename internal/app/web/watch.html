@@ -35,6 +35,17 @@
 </form>
 </section>
 
+<section class="card">
+<h2>Record a price I saw</h2>
+<p class="hint">For sites Webwatcher cannot read, type in the price you saw in your browser. It is stored with the method "manual" and compared with your target and the previous price like any other price.</p>
+<form method="post" action="/watches/{{.ID}}/price" class="stack">
+  <input type="hidden" name="csrf" value="{{$.CSRF}}">
+  <label for="price">Record a price I saw ({{.TargetCurrency}})</label>
+  <input id="price" name="price" inputmode="decimal" maxlength="15" placeholder="499.99" required>
+  <button type="submit">Record price</button>
+</form>
+</section>
+
 <div class="row">
 {{if or .Paused .Stopped}}
 <form method="post" action="/watches/{{.ID}}/resume" class="inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="back" value="watch"><button type="submit">{{if .Paused}}Resume{{else}}Retry{{end}}</button></form>

@@ -158,18 +158,7 @@ func (s *Scheduler) onSuccess(ctx context.Context, w *Watch, res *Result) {
 		}
 		return
 	}
-	// A price in another currency is never compared with the target.
-	target := w.TargetPence
-	if obs.CurrencyMismatch {
-		target = nil
-	}
-	kind := EvaluateAlert(AlertInput{Prev: w.AlertBase, Cur: res.PricePence, Target: target})
-	w.Currency = res.Currency
-	var qa *QueuedAlert
-	if kind != "" && w.AlertsOn {
-		qa = &QueuedAlert{Kind: kind, Price: res.PricePence, Msg: BuildAlertMessage(kind, w, w.AlertBase, res.PricePence, "", s.baseURL),
-			Old: w.AlertBase, Target: w.TargetPence, Currency: res.Currency}
-	}
+	qa := alertFor(w, obs, s.baseURL)
 	// The price update and its alert are committed together; the sender loop delivers it.
 	if err := s.store.RecordObservation(w.ID, obs, next, &res.PricePence, qa); err != nil && !errors.Is(err, ErrStale) {
 		slog.Error("record success", "watch", w.ID, "host", hostOf(w.URL), "err", RedactPII(err.Error()))
