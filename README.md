@@ -194,6 +194,8 @@ Webwatcher refuses to start unless it is configured for production: `WW_BASE_URL
 | `WW_RETAIN_HISTORY_DAYS` | `90` | Price history older than this is purged daily. |
 | `WW_RETAIN_DIAG_DAYS` | `30` | Check logs and finished outbox rows older than this are purged daily. |
 | `WW_BACKUP_KEY` | empty | 32 random bytes, base64 (`openssl rand -base64 32`). If set, backups are AES-256-GCM encrypted. If empty, backups are plaintext (still mode 0600) and a warning is logged. |
+| `WW_SESSION_DAYS` | `30` | Login session lifetime in days (1 to 365). |
+| `WW_MAX_USERS` | `25` | Account cap for adding accounts from the admin page (the command line is not capped). |
 | `WW_RESPECT_ROBOTS` | unset | `1` makes the fetcher check robots.txt (opt-in, see limitations). |
 | `WW_WA_APP_SECRET` | | Meta: app secret, used to verify `X-Hub-Signature-256` on `POST /hook/meta`. Without it that endpoint is 404. |
 | `WW_WA_VERIFY_TOKEN` | | Meta: token you choose, checked on the `GET /hook/meta` subscription challenge. Without it that endpoint is 404. |
@@ -211,6 +213,32 @@ Webwatcher refuses to start unless it is configured for production: `WW_BASE_URL
 Secrets are read from the environment only. They are never stored in the database or written to logs.
 
 The `log` messenger prints every message, including login links, to the log. It is for development only.
+
+## Permanent login link
+
+One-time links last 15 minutes and work once. For your own account you can instead have one **permanent link** that you bookmark. It is created only from the command line:
+
+```
+sudo -u webwatcher webwatcher permalink +447700900123              # create, or rotate (replaces the old link)
+sudo -u webwatcher webwatcher permalink --show-status +447700900123 # created / last used, never the token
+sudo -u webwatcher webwatcher permalink --revoke +447700900123      # revoke
+```
+
+The command prints `https://<your host>/p/<token>` once. Only a SHA-256 hash is stored, so it cannot be shown again; run the command again to replace it. The account is created if it does not exist. Opening the link starts a normal session (same cookie flags, `WW_SESSION_DAYS`) and redirects to the dashboard. Opening it does not use it up, so link-preview bots cannot burn it. A wrong token returns the same 404 as any unknown path, and an IP that fails 20 times in an hour gets 429.
+
+**Security note: anyone holding the link has full access to the account. Treat it like a password.** Do not paste it into chats or shared notes. If it leaks, rotate or revoke it with the command above, or press Revoke under "Personal login link" on the dashboard. A hijacked session can revoke but never create a permanent link. Revoking does not end sessions already started: use Account, Log out everywhere as well. Deleting the account removes the link. The `/p/` path is never logged by Webwatcher, and `deploy/Caddyfile.webwatcher` keeps it out of Caddy's access log (`log_skip` covers `/auth/*` and `/p/*`).
+
+## Adding accounts
+
+Admins get an **Accounts** page (`/admin/users`, 404 for everyone else). Mark an account admin from the command line:
+
+```
+sudo -u webwatcher webwatcher setadmin +447700900123            # creates the account if absent
+sudo -u webwatcher webwatcher setadmin --revoke +447700900123   # refused for the last enabled admin
+sudo -u webwatcher webwatcher permalink --admin +447700900123   # also works with adduser --admin
+```
+
+From the page an admin can add an account (number normalised to `+44...`, optional display name, up to `WW_MAX_USERS`), create or rotate that account's permanent link (shown once, copy it at once, never logged), revoke it, disable or enable the account, and delete it (with a confirmation tick, erasing everything as Delete account does). Disabling ends the account's sessions, blocks both kinds of login link and makes the scheduler skip its watches. Admins cannot disable or delete themselves or the last enabled admin, and cannot create or rotate their own permanent link from the page (command line only). Every action is written to an audit log (who, action, account, time; no secrets), shown at the bottom of the page. Numbers on the page are masked. Normal users never see other accounts.
 
 ## WhatsApp setup
 

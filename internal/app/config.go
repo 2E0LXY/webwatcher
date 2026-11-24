@@ -174,3 +174,11 @@ func (c Config) SessionLifetime() time.Duration {
 // SecureCookies reports whether session cookies should carry the Secure flag.
 // They always do when the public URL is HTTPS; plain-HTTP is for local dev only.
 func (c Config) SecureCookies() bool { return strings.HasPrefix(c.BaseURL, "https://") }
+
+// UserCap is the account limit for the admin page (DefaultMaxUsers when unset).
+func (c Config) UserCap() int {
+	if c.MaxUsers < 1 {
+		return DefaultMaxUsers
+	}
+	return c.MaxUsers
+}

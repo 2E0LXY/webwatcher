@@ -130,7 +130,7 @@ func (s *Server) renderAdmin(w http.ResponseWriter, r *http.Request, sess *Sessi
 		s.message(w, r, 500, "Error", "Something went wrong.")
 		return
 	}
-	d := pageData{Title: "Accounts", UserID: sess.UserID, Phone: sess.Phone, CSRF: sess.CSRF, LoggedIn: true, Error: errMsg, Flash: flash, MaxUsers: s.cfg.MaxUsers, Count: len(users)}
+	d := pageData{Title: "Accounts", UserID: sess.UserID, Phone: sess.Phone, CSRF: sess.CSRF, LoggedIn: true, Error: errMsg, Flash: flash, MaxUsers: s.cfg.UserCap(), Count: len(users)}
 	for _, u := range users {
 		row := adminRow{ID: u.ID, Phone: MaskPhone(u.Phone), Name: u.Name, Created: stamp(u.Created), Login: stamp(u.LastLogin),
 			Watches: u.Watches, Disabled: u.Disabled, IsAdmin: u.IsAdmin, HasLink: u.LinkExists, IsSelf: u.ID == sess.UserID, Alerts: "off"}
@@ -159,13 +159,13 @@ func (s *Server) handleAdminAdd(w http.ResponseWriter, r *http.Request, sess *Se
 		s.renderAdmin(w, r, sess, http.StatusBadRequest, "That is not a valid phone number. Use international format, for example +447700900123.", "")
 		return
 	}
-	uid, err := s.store.CreateUserCapped(p, r.PostFormValue("name"), s.dashboardOnly(), s.cfg.MaxUsers)
+	uid, err := s.store.CreateUserCapped(p, r.PostFormValue("name"), s.dashboardOnly(), s.cfg.UserCap())
 	switch {
 	case errors.Is(err, ErrUserExists):
 		s.renderAdmin(w, r, sess, http.StatusConflict, "An account with that number already exists.", "")
 		return
 	case errors.Is(err, ErrUserCap):
-		s.renderAdmin(w, r, sess, http.StatusConflict, fmt.Sprintf("The limit of %d accounts has been reached (WW_MAX_USERS).", s.cfg.MaxUsers), "")
+		s.renderAdmin(w, r, sess, http.StatusConflict, fmt.Sprintf("The limit of %d accounts has been reached (WW_MAX_USERS).", s.cfg.UserCap()), "")
 		return
 	case err != nil:
 		slog.Error("admin add account", "err", RedactPII(err.Error()))

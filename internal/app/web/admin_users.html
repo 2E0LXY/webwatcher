@@ -6,7 +6,7 @@
 <form method="post" action="/admin/users/add" class="stack">
   <input type="hidden" name="csrf" value="{{.CSRF}}">
   <label for="phone">Phone number</label>
-  <input id="phone" name="phone" required maxlength="30" placeholder="+447700900123" autocomplete="off">
+  <input id="phone" name="phone" required maxlength="30" placeholder="+44 7xxx xxxxxx" autocomplete="off">
   <label for="name">Display name (optional)</label>
   <input id="name" name="name" maxlength="40" autocomplete="off">
   <button type="submit">Add account</button>
