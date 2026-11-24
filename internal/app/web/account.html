@@ -1,6 +1,12 @@
 {{define "content"}}
 <h1>Account</h1>
 <p>Logged in as <strong>{{.Phone}}</strong>. You are watching {{.Count}} page{{if ne .Count 1}}s{{end}}.</p>
+<h2>Log out everywhere</h2>
+<p>Ends every login of yours on every device, including this one. Use it if you lost a phone or think someone else has your session.</p>
+<form method="post" action="/account/logout-everywhere" class="stack">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <button type="submit">Log out everywhere</button>
+</form>
 <h2>Delete account</h2>
 <p>This erases your number, every watch, all price history and all sessions. It cannot be undone.</p>
 <form method="post" action="/account/delete" class="stack">

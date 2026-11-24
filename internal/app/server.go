@@ -83,6 +83,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /watches/{id}/confirm-basis", s.withSession(s.handleConfirmBasis))
 	mux.HandleFunc("GET /account", s.withSession(s.handleAccount))
 	mux.HandleFunc("POST /account/delete", s.withSession(s.handleDeleteAccount))
+	mux.HandleFunc("POST /account/logout-everywhere", s.withSession(s.handleLogoutEverywhere))
 	mux.HandleFunc("POST /account/alerts", s.withSession(s.handleToggleAlerts))
 	mux.HandleFunc("GET /hook/meta", s.handleMetaVerify)
 	mux.HandleFunc("POST /hook/meta", s.handleMetaPost)
@@ -747,6 +748,16 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request, ses
 	}
 	s.setCookie(w, s.sessionCookieName(), "", -1)
 	s.message(w, r, http.StatusOK, "Account deleted", "Your number, watches, price history and sessions have been erased.")
+}
+
+// handleLogoutEverywhere revokes every session of the user, this one included.
+func (s *Server) handleLogoutEverywhere(w http.ResponseWriter, r *http.Request, sess *Session) {
+	if err := s.store.DeleteUserSessions(sess.UserID); err != nil {
+		s.message(w, r, 500, "Error", "Could not log you out everywhere.")
+		return
+	}
+	s.setCookie(w, s.sessionCookieName(), "", -1)
+	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 
 func (s *Server) handleToggleAlerts(w http.ResponseWriter, r *http.Request, sess *Session) {
