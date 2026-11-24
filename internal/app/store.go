@@ -44,14 +44,33 @@ type Session struct {
 // When consent is true the explicit WhatsApp opt-in tick is recorded with the
 // current time and copied to the user when the token is consumed.
 func (s *Store) CreateLoginToken(phone, hash string, ttl time.Duration, consent bool) error {
+	source := ""
+	if consent {
+		source = "login-form"
+	}
+	return s.createLoginToken(phone, hash, ttl, source)
+}
+
+// ConsentAdminCreated is the consent source recorded for users added with the
+// local `webwatcher adduser` command.
+const ConsentAdminCreated = "admin-created"
+
+// CreateAdminLoginToken is CreateLoginToken for the operator CLI: consent is
+// recorded as admin-created.
+func (s *Store) CreateAdminLoginToken(phone, hash string, ttl time.Duration) error {
+	return s.createLoginToken(phone, hash, ttl, ConsentAdminCreated)
+}
+
+func (s *Store) createLoginToken(phone, hash string, ttl time.Duration, source string) error {
 	now := s.clock.Now()
 	var c *int64
-	if consent {
+	var src *string
+	if source != "" {
 		n := now.Unix()
-		c = &n
+		c, src = &n, &source
 	}
-	_, err := s.db.Exec(`INSERT INTO login_tokens(phone, token_hash, created_at, expires_at, consent_at) VALUES(?,?,?,?,?)`,
-		phone, hash, now.Unix(), now.Add(ttl).Unix(), c)
+	_, err := s.db.Exec(`INSERT INTO login_tokens(phone, token_hash, created_at, expires_at, consent_at, consent_source) VALUES(?,?,?,?,?,?)`,
+		phone, hash, now.Unix(), now.Add(ttl).Unix(), c, src)
 	return err
 }
 
@@ -66,8 +85,9 @@ func (s *Store) ConsumeLoginToken(hash string) (int64, string, error) {
 	now := s.now()
 	var phone string
 	var consent *int64
-	err = tx.QueryRow(`UPDATE login_tokens SET used_at=? WHERE token_hash=? AND used_at IS NULL AND expires_at>? RETURNING phone, consent_at`,
-		now, hash, now).Scan(&phone, &consent)
+	var source *string
+	err = tx.QueryRow(`UPDATE login_tokens SET used_at=? WHERE token_hash=? AND used_at IS NULL AND expires_at>? RETURNING phone, consent_at, consent_source`,
+		now, hash, now).Scan(&phone, &consent, &source)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, "", ErrInvalidToken
 	}
@@ -75,10 +95,11 @@ func (s *Store) ConsumeLoginToken(hash string) (int64, string, error) {
 		return 0, "", err
 	}
 	var uid int64
-	err = tx.QueryRow(`INSERT INTO users(phone, created_at, last_login_at, consent_at) VALUES(?,?,?,?)
+	err = tx.QueryRow(`INSERT INTO users(phone, created_at, last_login_at, consent_at, consent_source) VALUES(?,?,?,?,?)
 		ON CONFLICT(phone) DO UPDATE SET last_login_at=excluded.last_login_at,
+			consent_source=CASE WHEN users.consent_at IS NULL THEN excluded.consent_source ELSE users.consent_source END,
 			consent_at=COALESCE(users.consent_at, excluded.consent_at) RETURNING id`,
-		phone, now, now, consent).Scan(&uid)
+		phone, now, now, consent, source).Scan(&uid)
 	if err != nil {
 		return 0, "", err
 	}

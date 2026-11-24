@@ -129,6 +129,8 @@ var migrations = []string{
 	`ALTER TABLE watches ADD COLUMN version INTEGER NOT NULL DEFAULT 0;
 	ALTER TABLE outbox ADD COLUMN watch_version INTEGER NOT NULL DEFAULT 0;`,
 	`ALTER TABLE send_log ADD COLUMN kind TEXT NOT NULL DEFAULT 'alert';`,
+	`ALTER TABLE users ADD COLUMN consent_source TEXT;
+	ALTER TABLE login_tokens ADD COLUMN consent_source TEXT;`,
 }
 
 // OpenDB opens (creating if needed) the SQLite database in dir and migrates it.

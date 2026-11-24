@@ -20,6 +20,9 @@ import (
 var version = "dev"
 
 func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "doctor" || os.Args[1] == "adduser") {
+		os.Exit(subcommand(os.Args[1], os.Args[2:]))
+	}
 	showVersion := flag.Bool("version", false, "print version and exit")
 	decrypt := flag.String("decrypt-backup", "", "decrypt an encrypted backup file (key from WW_BACKUP_KEY) and exit")
 	out := flag.String("out", "", "output file for -decrypt-backup")
@@ -132,4 +135,48 @@ func run() error {
 	srv.Wait()
 	wg.Wait()
 	return nil
+}
+
+// subcommand runs the operator commands `doctor` and `adduser` and returns the
+// process exit status. Both read the same settings as the service.
+func subcommand(name string, args []string) int {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	envFile := fs.String("env", "", "read settings from this file instead of the environment (default: the environment, else "+app.DefaultEnvFile+")")
+	// Allow the phone number before or after flags.
+	var rest []string
+	for len(args) > 0 {
+		if err := fs.Parse(args); err != nil {
+			return 2
+		}
+		args = fs.Args()
+		if len(args) > 0 {
+			rest = append(rest, args[0])
+			args = args[1:]
+		}
+	}
+	getenv, err := app.EnvLookup(*envFile, os.Getenv)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	switch name {
+	case "doctor":
+		if len(rest) != 0 {
+			fmt.Fprintln(os.Stderr, "usage: webwatcher doctor [-env FILE]")
+			return 2
+		}
+		if app.Doctor(getenv, os.Stdout) != 0 {
+			return 1
+		}
+	case "adduser":
+		if len(rest) != 1 {
+			fmt.Fprintln(os.Stderr, "usage: webwatcher adduser [-env FILE] +447700900123")
+			return 2
+		}
+		if err := app.AddUser(getenv, rest[0], os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			return 1
+		}
+	}
+	return 0
 }
