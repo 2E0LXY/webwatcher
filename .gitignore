@@ -1,0 +1,6 @@
+webwatcher
+/data/
+*.db
+*.db-*
+*.env
+dist/
