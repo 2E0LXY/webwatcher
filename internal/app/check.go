@@ -22,6 +22,8 @@ type CheckFailure struct {
 	Status     string
 	Reason     string
 	RetryAfter time.Duration // from a Retry-After header on 429/503; 0 if none
+	Class      string        // precise cause (see diag.go); empty for deferred
+	Timing     Timing
 }
 
 func (c *CheckFailure) Error() string { return c.Reason }
@@ -86,14 +88,18 @@ func checkPageAt(p *Page, selector string, now time.Time) (*Result, *CheckFailur
 	case p.NotModified:
 		return &Result{NotModified: true}, nil
 	case p.Status == 403 || p.Status == 429:
-		return nil, &CheckFailure{"blocked", fmt.Sprintf("blocked by site (HTTP %d)", p.Status), ra}
+		return nil, &CheckFailure{Status: "blocked", Reason: fmt.Sprintf("blocked by site (HTTP %d)", p.Status), RetryAfter: ra, Class: map[int]string{403: ClassHTTP403, 429: ClassHTTP429}[p.Status]}
 	case p.Status == 503 && looksLikeBotChallenge(p):
-		return nil, &CheckFailure{"blocked", "blocked by site (bot challenge, HTTP 503)", ra}
+		return nil, &CheckFailure{Status: "blocked", Reason: "blocked by site (bot challenge, HTTP 503)", RetryAfter: ra, Class: ClassChallenge}
 	case p.Status < 200 || p.Status >= 300:
-		return nil, &CheckFailure{"error", fmt.Sprintf("site returned HTTP %d", p.Status), ra}
+		class := ClassHTTPOther
+		if p.Status >= 500 {
+			class = ClassHTTP5xx
+		}
+		return nil, &CheckFailure{Status: "error", Reason: fmt.Sprintf("site returned HTTP %d", p.Status), RetryAfter: ra, Class: class}
 	}
 	if p.Truncated {
-		return nil, &CheckFailure{"error", fmt.Sprintf("the page is larger than %d MB; it was cut off and not parsed", MaxBodyBytes>>20), 0}
+		return nil, &CheckFailure{Status: "error", Reason: fmt.Sprintf("the page is larger than %d MB; it was cut off and not parsed", MaxBodyBytes>>20), Class: ClassTooLarge}
 	}
 	res, err := Extract(p.Body, selector)
 	if err == nil {
@@ -101,13 +107,13 @@ func checkPageAt(p *Page, selector string, now time.Time) (*Result, *CheckFailur
 		return res, nil
 	}
 	if looksLikeBotChallenge(p) && len(p.Body) < 100<<10 {
-		return nil, &CheckFailure{"blocked", "blocked by site (bot challenge page)", 0}
+		return nil, &CheckFailure{Status: "blocked", Reason: "blocked by site (bot challenge page)", Class: ClassChallenge}
 	}
 	var ee *ExtractError
 	if errors.As(err, &ee) {
-		return nil, &CheckFailure{"noprice", ee.Reason, 0}
+		return nil, &CheckFailure{Status: "noprice", Reason: ee.Reason, Class: ClassNoPrice}
 	}
-	return nil, &CheckFailure{"noprice", err.Error(), 0}
+	return nil, &CheckFailure{Status: "noprice", Reason: err.Error(), Class: ClassNoPrice}
 }
 
 // CheckURL fetches and extracts in one step.
@@ -118,13 +124,24 @@ func CheckURL(ctx context.Context, f Fetcher, rawURL, selector string, cond *Con
 		if errors.As(err, &fe) {
 			switch fe.Kind {
 			case "disallowed":
-				return nil, &CheckFailure{"disallowed", fe.Msg, 0}
+				return nil, &CheckFailure{Status: "disallowed", Reason: fe.Msg, Class: ClassRobots, Timing: fe.Timing}
 			case "ratelimit":
-				return nil, &CheckFailure{"deferred", fe.Msg, fe.Wait}
+				return nil, &CheckFailure{Status: "deferred", Reason: fe.Msg, RetryAfter: fe.Wait}
 			}
-			return nil, &CheckFailure{"error", fe.Msg, 0}
+			class := fe.Class
+			if class == "" && fe.Kind == "network" {
+				class = ClassNetworkOther
+			}
+			return nil, &CheckFailure{Status: "error", Reason: fe.Msg, Class: class, Timing: fe.Timing}
 		}
-		return nil, &CheckFailure{"error", "fetch failed: " + shortErr(err), 0}
+		return nil, &CheckFailure{Status: "error", Reason: "fetch failed: " + shortErr(err), Class: ClassNetworkOther}
 	}
-	return checkPageAt(p, selector, time.Now())
+	res, fail := checkPageAt(p, selector, time.Now())
+	if res != nil {
+		res.Timing = p.Timing
+	}
+	if fail != nil {
+		fail.Timing = p.Timing
+	}
+	return res, fail
 }

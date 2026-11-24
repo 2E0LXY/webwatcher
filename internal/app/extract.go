@@ -22,6 +22,7 @@ type Result struct {
 	NotModified  bool   // 304: nothing to extract, the last observation stands
 	ETag         string // validators of this response, for the next conditional GET
 	LastModified string
+	Timing       Timing // per-phase durations of the fetch
 }
 
 // Price bases. A price per person and a price for the whole party must never

@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -82,6 +83,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /watches/{id}/pause", s.withSession(s.handlePause(true)))
 	mux.HandleFunc("POST /watches/{id}/resume", s.withSession(s.handlePause(false)))
 	mux.HandleFunc("POST /watches/{id}/delete", s.withSession(s.handleDeleteWatch))
+	mux.HandleFunc("POST /watches/{id}/price", s.withSession(s.handleManualPrice))
 	mux.HandleFunc("POST /watches/{id}/confirm-basis", s.withSession(s.handleConfirmBasis))
 	mux.HandleFunc("GET /account", s.withSession(s.handleAccount))
 	mux.HandleFunc("POST /account/delete", s.withSession(s.handleDeleteAccount))
@@ -283,36 +285,73 @@ type intervalOpt struct {
 }
 
 type watchView struct {
-	ID           int64
-	Title        string
-	URL          string
-	Host         string
-	Price        string
-	Checked      string
-	Status       string // css class: ok, pending, blocked, error, paused, stopped
-	StatusTxt    string
-	Reason       string
-	Target       string
-	TargetVal    string
-	Method       string
-	Interval     string
-	Paused       bool
-	Stopped      bool
-	Selector     string
-	Failures     int
-	SoldOut      bool
-	Kept         bool // a check failed but the last valid price is still shown
-	BasisChanged bool
-	BasisNote    string
-	Fetch        string // server or agent
-	FetchAgent   bool
-	SuggestAgent bool // a site that usually needs the home agent, still fetched by the server
+	ID               int64
+	Title            string
+	URL              string
+	Host             string
+	Price            string
+	Checked          string
+	Status           string // css class: ok, pending, blocked, error, paused, stopped
+	StatusTxt        string
+	Reason           string
+	Target           string
+	TargetVal        string
+	Method           string
+	Interval         string
+	Paused           bool
+	Stopped          bool
+	Selector         string
+	Failures         int
+	SoldOut          bool
+	Kept             bool // a check failed but the last valid price is still shown
+	BasisChanged     bool
+	BasisNote        string
+	CurrencyMismatch bool
+	MismatchNote     string
+	TargetCurrency   string
+	RetryNote        string
+	Fetch            string // server or agent
+	FetchAgent       bool
+	SuggestAgent     bool // a site that usually needs the home agent, still fetched by the server
+}
+
+type curOpt struct {
+	Code     string
+	Selected bool
+}
+
+func currencyOpts(sel string) []curOpt {
+	if !validTargetCurrency(sel) {
+		sel = DefaultCurrency
+	}
+	var out []curOpt
+	for _, c := range TargetCurrencies {
+		out = append(out, curOpt{c, c == sel})
+	}
+	return out
+}
+
+type checkView struct {
+	When, Outcome, Class, Retry, Timing string
+}
+
+type failView struct {
+	Class, Kind, Hint, When string
+}
+
+func fmtTiming(t Timing) string {
+	if t == (Timing{}) {
+		return "–"
+	}
+	return fmt.Sprintf("dns %d ms, connect %d ms, tls %d ms, first byte %d ms, total %d ms",
+		t.DNS.Milliseconds(), t.Connect.Milliseconds(), t.TLS.Milliseconds(), t.TTFB.Milliseconds(), t.Total.Milliseconds())
 }
 
 type histView struct{ Price, When, Method string }
 
 type formVals struct {
 	URL, Label, Selector, Target string
+	TargetCurrency               string
 	Interval                     int
 	QueryKeys                    string // names of token-like query parameters; needs a confirmation tick
 	Fetch                        string // server or agent
@@ -332,6 +371,9 @@ type pageData struct {
 	W           *watchView
 	History     []histView
 	Intervals   []intervalOpt
+	Currencies  []curOpt
+	Checks      []checkView
+	Fail        *failView
 	Count       int
 	Cap         int
 	Msgs        []devMsg
@@ -395,7 +437,7 @@ func (s *Server) message(w http.ResponseWriter, r *http.Request, status int, hea
 
 var flashes = map[string]string{
 	"added": "Watch added. The first check happens within a minute or so.", "deleted": "Watch deleted.",
-	"saved": "Changes saved.", "confirmed": "New price basis confirmed. The baseline has been reset.", "alerts_on": "WhatsApp alerts are on.", "alerts_off": "WhatsApp alerts are off. You will get no more alert messages.", "read": "Marked as read.", "allread": "All notifications marked as read.", "link_revoked": "Permanent link revoked.", "paused": "Watch paused.", "resumed": "Watch resumed.",
+	"saved": "Changes saved.", "recorded": "Price recorded. It is evaluated against your target like any other price.", "confirmed": "New price basis confirmed. The baseline has been reset.", "alerts_on": "WhatsApp alerts are on.", "alerts_off": "WhatsApp alerts are off. You will get no more alert messages.", "read": "Marked as read.", "allread": "All notifications marked as read.", "link_revoked": "Permanent link revoked.", "paused": "Watch paused.", "resumed": "Watch resumed.",
 }
 
 func intervalLabel(m int) string {
@@ -442,13 +484,25 @@ func (s *Server) view(w *Watch) watchView {
 		v.Price = FormatPence(*w.LastPricePence, w.Currency)
 	}
 	if w.TargetPence != nil {
-		v.Target = FormatPence(*w.TargetPence, w.Currency)
+		v.Target = FormatPence(*w.TargetPence, w.TargetCurrency)
 		v.TargetVal = fmt.Sprintf("%d.%02d", *w.TargetPence/100, *w.TargetPence%100)
 	}
 	if w.LastCheckedAt != nil {
 		v.Checked = time.Unix(*w.LastCheckedAt, 0).In(london).Format("2 Jan 2006, 15:04")
 	}
+	v.TargetCurrency = w.TargetCurrency
+	if w.QuickPending && !w.Paused {
+		v.RetryNote = fmt.Sprintf("Quick retry %d of %d is scheduled; the normal interval resumes if they fail.", w.QuickRetry, len(quickRetryDelays))
+	}
 	v.Stopped = w.Failures >= MaxFailures
+	if w.CurrencyMismatch && w.TargetPence != nil {
+		v.CurrencyMismatch = true
+		obsCur := w.Currency
+		if w.BasisChanged && w.ObsCurrency != "" {
+			obsCur = w.ObsCurrency
+		}
+		v.MismatchNote = fmt.Sprintf("Currency mismatch: your target is in %s but the page shows %s. The price is recorded but not compared with your target, so no below-target alert can fire. Change the target currency, or choose a page that shows %s.", w.TargetCurrency, obsCur, w.TargetCurrency)
+	}
 	v.SoldOut = w.SoldOut
 	v.Kept = w.LastPricePence != nil && (w.Status == "error" || w.Status == "noprice")
 	if w.LastPricePence != nil {
@@ -466,6 +520,8 @@ func (s *Server) view(w *Watch) watchView {
 		v.Status, v.StatusTxt = "stopped", "Stopped after 10 failed checks"
 	case w.BasisChanged:
 		v.Status, v.StatusTxt = "error", "Basis changed"
+	case v.CurrencyMismatch:
+		v.Status, v.StatusTxt = "error", "Currency mismatch"
 	case w.SoldOut:
 		v.Status, v.StatusTxt = "paused", "Sold out"
 	case w.Status == "blocked":
@@ -599,7 +655,7 @@ func (s *Server) renderDashboard(w http.ResponseWriter, r *http.Request, sess *S
 		return
 	}
 	d := pageData{Title: "Dashboard", UserID: sess.UserID, Phone: sess.Phone, CSRF: sess.CSRF, LoggedIn: true, Form: f, Error: errMsg,
-		Flash: flashes[r.URL.Query().Get("m")], Intervals: intervalOpts(f.Interval), Count: len(ws), Cap: MaxWatchesPerUser,
+		Flash: flashes[r.URL.Query().Get("m")], Intervals: intervalOpts(f.Interval), Currencies: currencyOpts(f.TargetCurrency), Count: len(ws), Cap: MaxWatchesPerUser,
 		AlertsOn: sess.AlertsEnabled, Consented: sess.ConsentAt != nil, PL: s.personalLinkView(sess.UserID)}
 	modes, _ := s.store.FetchModes(sess.UserID)
 	for _, x := range ws {
@@ -647,13 +703,17 @@ func (s *Server) handleAddWatch(w http.ResponseWriter, r *http.Request, sess *Se
 	f := formVals{
 		URL: strings.TrimSpace(r.PostFormValue("url")), Label: strings.TrimSpace(r.PostFormValue("label")),
 		Selector: strings.TrimSpace(r.PostFormValue("selector")), Target: strings.TrimSpace(r.PostFormValue("target")),
-		Fetch: r.PostFormValue("fetch"),
+		Fetch:          r.PostFormValue("fetch"),
+		TargetCurrency: r.PostFormValue("target_currency"),
 	}
 	iv, ok := parseInterval(r.PostFormValue("interval"))
 	if !ok {
 		iv = DefaultIntervalMin
 	}
 	f.Interval = iv
+	if !validTargetCurrency(f.TargetCurrency) {
+		f.TargetCurrency = DefaultCurrency
+	}
 	fail := func(msg string) { s.renderDashboard(w, r, sess, http.StatusBadRequest, f, msg) }
 	clean, err := ValidateWatchURL(f.URL)
 	if err != nil {
@@ -681,7 +741,7 @@ func (s *Server) handleAddWatch(w http.ResponseWriter, r *http.Request, sess *Se
 		fail(capitalise(err.Error()) + ".")
 		return
 	}
-	id, err := s.store.AddWatch(Watch{UserID: sess.UserID, URL: clean, Label: f.Label, Selector: f.Selector, TargetPence: target, IntervalMin: iv})
+	_, err = s.store.AddWatch(Watch{UserID: sess.UserID, URL: clean, Label: f.Label, Selector: f.Selector, TargetPence: target, TargetCurrency: f.TargetCurrency, IntervalMin: iv, FetchMode: fetchModeFromForm(f.Fetch)})
 	if err == ErrWatchCap {
 		fail(fmt.Sprintf("You can watch at most %d pages. Delete one first.", MaxWatchesPerUser))
 		return
@@ -690,9 +750,6 @@ func (s *Server) handleAddWatch(w http.ResponseWriter, r *http.Request, sess *Se
 		slog.Error("add watch", "err", RedactPII(err.Error()))
 		fail("Could not save the watch.")
 		return
-	}
-	if err := s.applyFetchChoice(r, sess.UserID, id); err != nil {
-		slog.Error("set fetch mode", "err", RedactPII(err.Error()))
 	}
 	http.Redirect(w, r, "/?m=added", http.StatusSeeOther)
 }
@@ -730,9 +787,22 @@ func (s *Server) renderWatch(w http.ResponseWriter, status int, sess *Session, w
 	s.decorateAgentView(&v, wt, mode)
 	hist, _ := s.store.History(wt.UserID, wt.ID, 100)
 	d := pageData{Title: v.Title, UserID: sess.UserID, Phone: sess.Phone, CSRF: sess.CSRF, LoggedIn: true, W: &v, Error: errMsg, Flash: flash,
-		Intervals: intervalOpts(wt.IntervalMin)}
+		Intervals: intervalOpts(wt.IntervalMin), Currencies: currencyOpts(wt.TargetCurrency)}
 	for _, h := range hist {
 		d.History = append(d.History, histView{FormatPence(h.PricePence, h.Currency) + basisSuffix(h.Basis), time.Unix(h.CheckedAt, 0).In(london).Format("2 Jan 2006, 15:04"), h.Method})
+	}
+	if cs, err := s.store.RecentChecks(wt.UserID, wt.ID, 12); err == nil {
+		for i, c := range cs {
+			when := time.Unix(c.At, 0).In(london).Format("2 Jan, 15:04")
+			retry := ""
+			if c.Retry > 0 {
+				retry = fmt.Sprintf("quick retry %d", c.Retry)
+			}
+			d.Checks = append(d.Checks, checkView{when, c.Outcome, c.Class, retry, fmtTiming(c.Timing)})
+			if i == 0 && c.Class != "" && FailureHint(c.Class) != "" {
+				d.Fail = &failView{c.Class, FailureKind(c.Class), FailureHint(c.Class), when}
+			}
+		}
 	}
 	s.render(w, status, "watch", d)
 }
@@ -750,6 +820,13 @@ func (s *Server) handleEditWatch(w http.ResponseWriter, r *http.Request, sess *S
 	iv, ok := parseInterval(r.PostFormValue("interval"))
 	if !ok {
 		iv = wt.IntervalMin
+	}
+	if c := r.PostFormValue("target_currency"); validTargetCurrency(c) && c != wt.TargetCurrency {
+		if err := s.store.SetTargetCurrency(sess.UserID, wt.ID, c); err != nil {
+			s.message(w, r, 500, "Error", "Could not save.")
+			return
+		}
+		wt.TargetCurrency = c
 	}
 	same := (target == nil && wt.TargetPence == nil) || (target != nil && wt.TargetPence != nil && *target == *wt.TargetPence)
 	if !same {
@@ -789,6 +866,51 @@ func (s *Server) handlePause(pause bool) sessHandler {
 		}
 		http.Redirect(w, r, dest, http.StatusSeeOther)
 	}
+}
+
+var manualPriceRe = regexp.MustCompile(`^[£€$]?\s*[0-9][0-9.,]*$`)
+
+// handleManualPrice records a price the user saw, for sites Webwatcher cannot read.
+func (s *Server) handleManualPrice(w http.ResponseWriter, r *http.Request, sess *Session) {
+	wt, ok := s.watchFromPath(w, r, sess)
+	if !ok {
+		return
+	}
+	pence, ok := parseAmount(strings.TrimSpace(r.PostFormValue("price")))
+	if raw := strings.TrimSpace(r.PostFormValue("price")); !ok || !manualPriceRe.MatchString(raw) || len(raw) > 15 || pence <= 0 || pence > 100_000_000 {
+		s.renderWatch(w, http.StatusBadRequest, sess, wt, "The price must be an amount such as 499.99.", "")
+		return
+	}
+	obs := manualObservation(wt, pence)
+	obs.Version = &wt.Version
+	qa := alertFor(wt, obs, s.cfg.BaseURL)
+	switch err := s.store.RecordManual(wt.ID, obs, qa); {
+	case errors.Is(err, ErrStale):
+		s.renderWatch(w, http.StatusConflict, sess, wt, "This watch is paused or has just changed. Resume it, then record the price again.", "")
+		return
+	case err != nil:
+		slog.Error("record manual price", "watch", wt.ID, "err", RedactPII(err.Error()))
+		s.message(w, r, 500, "Error", "Could not save.")
+		return
+	}
+	http.Redirect(w, r, fmt.Sprintf("/watches/%d?m=recorded", wt.ID), http.StatusSeeOther)
+}
+
+// manualObservation describes a typed-in price in the terms the watch already
+// tracks, so it is compared with them, not flagged as a different basis: the
+// same currency and price basis as the last price, or the target currency for
+// a watch with no price yet.
+func manualObservation(w *Watch, pence int64) Observation {
+	cur, basis := w.TargetCurrency, BasisUnknown
+	if w.LastPricePence != nil {
+		cur, basis = w.Currency, w.Basis
+	}
+	if basis == "" {
+		basis = BasisUnknown
+	}
+	o := Observation{Price: pence, Currency: cur, Method: MethodManual, Basis: basis}
+	o.CurrencyMismatch = w.TargetPence != nil && cur != w.TargetCurrency
+	return o
 }
 
 func (s *Server) handleConfirmBasis(w http.ResponseWriter, r *http.Request, sess *Session) {

@@ -8,6 +8,7 @@
   <dt>Target</dt><dd>{{.Target}}</dd>
   <dt>Status</dt><dd><span class="badge {{.Status}}">{{.StatusTxt}}</span></dd>
   {{if .Reason}}<dt>Last problem</dt><dd>{{.Reason}}{{if .Kept}} (last valid price kept){{end}}</dd>{{end}}
+  {{if .RetryNote}}<dt>Retrying</dt><dd>{{.RetryNote}}</dd>{{end}}
   <dt>Last checked</dt><dd>{{.Checked}}</dd>
   <dt>Found by</dt><dd>{{if .Method}}{{.Method}}{{else}}–{{end}}</dd>
   <dt>Check every</dt><dd>{{.Interval}}</dd>
@@ -16,20 +17,36 @@
 </dl>
 {{if .BasisChanged}}<p class="error">{{.BasisNote}}</p>
 <form method="post" action="/watches/{{.ID}}/confirm-basis" class="inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button type="submit">Confirm new basis and reset baseline</button></form>{{end}}
+{{with $.Fail}}<p class="error"><strong>Last failure: {{.Class}}{{if .Kind}} ({{.Kind}}){{end}}.</strong> {{.Hint}}</p>{{end}}
+{{if .CurrencyMismatch}}<p class="error">{{.MismatchNote}}</p>{{end}}
+{{if .CurrencyMismatch}}<p class="error">{{.MismatchNote}}</p>{{end}}
 {{if eq .Status "blocked"}}<p class="error">This site is blocking automated checks. Webwatcher does not try to get round bot protection, so this page cannot be watched for now.</p>{{end}}
 
 <section class="card">
 <h2>Edit</h2>
 <form method="post" action="/watches/{{.ID}}/edit" class="stack">
   <input type="hidden" name="csrf" value="{{$.CSRF}}">
-  <label for="target">Target price in pounds (leave empty for none)</label>
+  <label for="target">Target price (leave empty for none)</label>
   <input id="target" name="target" inputmode="decimal" maxlength="15" value="{{.TargetVal}}">
+  <label for="target_currency">Target currency</label>
+  <select id="target_currency" name="target_currency">{{range $.Currencies}}<option value="{{.Code}}"{{if .Selected}} selected{{end}}>{{.Code}}</option>{{end}}</select>
   <label for="interval">Check every</label>
   <select id="interval" name="interval">{{range $.Intervals}}<option value="{{.Minutes}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}</select>
   <label for="fetch">Fetch from</label>
   <select id="fetch" name="fetch"><option value="server"{{if not .FetchAgent}} selected{{end}}>This server</option><option value="agent"{{if .FetchAgent}} selected{{end}}>My home agent</option></select>
   {{if .SuggestAgent}}<p class="hint">This site usually blocks servers or needs JavaScript. If checks fail, choose My home agent.</p>{{end}}
   <button type="submit">Save</button>
+</form>
+</section>
+
+<section class="card">
+<h2>Record a price I saw</h2>
+<p class="hint">For sites Webwatcher cannot read, type in the price you saw in your browser. It is stored with the method "manual" and compared with your target and the previous price like any other price.</p>
+<form method="post" action="/watches/{{.ID}}/price" class="stack">
+  <input type="hidden" name="csrf" value="{{$.CSRF}}">
+  <label for="price">Record a price I saw ({{.TargetCurrency}})</label>
+  <input id="price" name="price" inputmode="decimal" maxlength="15" placeholder="499.99" required>
+  <button type="submit">Record price</button>
 </form>
 </section>
 
@@ -42,6 +59,16 @@
 <form method="post" action="/watches/{{.ID}}/delete" class="inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button type="submit" class="danger">Delete this watch</button></form>
 </div>
 {{end}}
+
+<h2>Recent checks</h2>
+{{if .Checks}}
+<div class="tablewrap">
+<table>
+<thead><tr><th>When</th><th>Outcome</th><th>Class</th><th>Timings</th></tr></thead>
+<tbody>{{range .Checks}}<tr><td>{{.When}}</td><td>{{.Outcome}}{{if .Retry}} ({{.Retry}}){{end}}</td><td>{{if .Class}}{{.Class}}{{else}}–{{end}}</td><td>{{.Timing}}</td></tr>{{end}}</tbody>
+</table>
+</div>
+{{else}}<p>No checks yet.</p>{{end}}
 
 <h2>Price history</h2>
 {{if .History}}

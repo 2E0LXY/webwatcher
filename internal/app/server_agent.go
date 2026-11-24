@@ -390,6 +390,14 @@ func (s *Server) applyFetchChoice(r *http.Request, uid, id int64) error {
 	return nil
 }
 
+// fetchModeFromForm maps the "Fetch from" select to a mode; absent or unknown means server.
+func fetchModeFromForm(v string) string {
+	if v == FetchAgent {
+		return FetchAgent
+	}
+	return FetchServer
+}
+
 // decorateAgentView adds the fetch mode, the offline state and the suggestion to a watch row.
 func (s *Server) decorateAgentView(v *watchView, w *Watch, mode string) {
 	if mode == "" {

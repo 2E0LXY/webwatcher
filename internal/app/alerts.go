@@ -105,3 +105,22 @@ func BuildAlertMessage(kind string, w *Watch, old *int64, cur int64, reason, bas
 	text := fmt.Sprintf("Webwatcher: %s: %s\n%s\nDashboard: %s", label, summary, page, dash)
 	return Message{Kind: KindAlert, To: w.Phone, Text: text, Params: []string{label, summary, page, dash}}
 }
+
+// alertFor applies the alert rules to a new observation of w and returns the
+// alert to queue, or nil. obs.CurrencyMismatch must already be set: a price in
+// another currency is never compared with the target. It also moves w.Currency
+// to the observed currency, which the message text uses. The scheduler and the
+// manual price entry share it, so both are evaluated the same way.
+func alertFor(w *Watch, obs Observation, baseURL string) *QueuedAlert {
+	target := w.TargetPence
+	if obs.CurrencyMismatch {
+		target = nil
+	}
+	kind := EvaluateAlert(AlertInput{Prev: w.AlertBase, Cur: obs.Price, Target: target})
+	w.Currency = obs.Currency
+	if kind == "" || !w.AlertsOn {
+		return nil
+	}
+	return &QueuedAlert{Kind: kind, Price: obs.Price, Msg: BuildAlertMessage(kind, w, w.AlertBase, obs.Price, "", baseURL),
+		Old: w.AlertBase, Target: w.TargetPence, Currency: obs.Currency}
+}

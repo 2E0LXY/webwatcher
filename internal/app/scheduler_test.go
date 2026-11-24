@@ -325,3 +325,16 @@ func indexOf(s, sub string) int {
 	}
 	return -1
 }
+
+func TestRetryAfterNeverUndercutByNegativeJitter(t *testing.T) {
+	e := newSchedEnv(t)
+	e.s.jitter = func(d time.Duration) time.Duration { return -d / 2 } // worst case: half the delay
+	const u = "https://a.example.com/"
+	id := e.add(t, u, nil, 30)
+	e.f.set(u, &Page{Status: 429, Header: http.Header{"Retry-After": {"7200"}}})
+	e.run(t, 0)
+	w, _ := e.st.WatchByID(id, e.uid)
+	if gap := w.NextCheckAt - e.clk.Now().Unix(); gap < 7200 {
+		t.Fatalf("next check %ds away, Retry-After is 7200s", gap)
+	}
+}
