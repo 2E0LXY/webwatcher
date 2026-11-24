@@ -1,0 +1,11 @@
+{{define "content"}}
+<h1>Dev messages</h1>
+<p>Shown because <code>WW_DEV=1</code> with the <code>log</code> messenger. Never enable this in production.</p>
+{{range .Msgs}}
+<article class="card">
+  <p><strong>{{.Kind}}</strong> to {{.To}}</p>
+  <pre>{{.Text}}</pre>
+  {{if .Link}}<p><a href="{{.Link}}">Open login link</a></p>{{end}}
+</article>
+{{else}}<p>No messages yet.</p>{{end}}
+{{end}}

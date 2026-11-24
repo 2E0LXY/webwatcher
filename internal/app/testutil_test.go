@@ -2,6 +2,9 @@ package app
 
 import (
 	"context"
+	"io"
+	"log/slog"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -66,4 +69,9 @@ func mustUser(t *testing.T, s *Store, phone string) int64 {
 		t.Fatal(err)
 	}
 	return uid
+}
+
+func TestMain(m *testing.M) {
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	os.Exit(m.Run())
 }

@@ -1,0 +1,29 @@
+{{define "layout"}}<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>{{.Title}} · Webwatcher</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="/">Webwatcher</a>
+  {{if .LoggedIn}}
+  <nav>
+    <a href="/">Dashboard</a>
+    <a href="/account">Account</a>
+    <span class="who">{{.Phone}}</span>
+    <form method="post" action="/logout" class="inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button type="submit" class="link">Log out</button></form>
+  </nav>
+  {{end}}
+</header>
+<main>
+{{if .Flash}}<p class="flash" role="status">{{.Flash}}</p>{{end}}
+{{if .Error}}<p class="error" role="alert">{{.Error}}</p>{{end}}
+{{block "content" .}}{{end}}
+</main>
+<footer>Webwatcher {{.Version}}. Stores your WhatsApp number and the URLs you watch, nothing else.{{if .Dev}} <a href="/dev">dev</a>{{end}}</footer>
+</body>
+</html>{{end}}

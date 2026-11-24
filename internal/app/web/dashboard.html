@@ -1,0 +1,57 @@
+{{define "content"}}
+<h1>Your watches</h1>
+
+<section class="card">
+<h2>Add a page to watch</h2>
+<form method="post" action="/watches" class="stack">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <label for="url">Page URL</label>
+  <input id="url" name="url" type="url" required maxlength="2048" placeholder="https://www.example.co.uk/product" value="{{.Form.URL}}">
+  <label for="label">Label (optional)</label>
+  <input id="label" name="label" maxlength="80" placeholder="Majorca week in July" value="{{.Form.Label}}">
+  <label for="target">Target price in pounds (optional)</label>
+  <input id="target" name="target" inputmode="decimal" maxlength="15" placeholder="499.99" value="{{.Form.Target}}">
+  <label for="interval">Check every</label>
+  <select id="interval" name="interval">{{range .Intervals}}<option value="{{.Minutes}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}</select>
+  <details>
+    <summary>Advanced: CSS selector</summary>
+    <p class="hint">If the price is not found automatically, give the selector of the element that holds it, for example <code>.price-box .amount</code> or <code>[data-price]</code>. Supported: tag, <code>.class</code>, <code>#id</code>, <code>[attr]</code>, <code>[attr=value]</code>, descendant (space) and <code>&gt;</code>.</p>
+    <label for="selector">CSS selector</label>
+    <input id="selector" name="selector" maxlength="200" value="{{.Form.Selector}}">
+  </details>
+  <button type="submit">Start watching</button>
+</form>
+<p class="hint">{{.Count}} of {{.Cap}} watches used.</p>
+</section>
+
+{{if .Watches}}
+<div class="tablewrap">
+<table>
+<thead><tr><th>Watch</th><th>Last price</th><th>Target</th><th>Last checked</th><th>Status</th><th></th></tr></thead>
+<tbody>
+{{range .Watches}}
+<tr>
+  <td data-label="Watch"><a href="/watches/{{.ID}}">{{.Title}}</a><br><span class="hint">{{.Host}}</span></td>
+  <td data-label="Last price">{{.Price}}</td>
+  <td data-label="Target">{{.Target}}</td>
+  <td data-label="Last checked">{{.Checked}}</td>
+  <td data-label="Status"><span class="badge {{.Status}}">{{.StatusTxt}}</span>
+    {{if eq .Status "blocked"}}<br><span class="hint">This site is blocking automated checks. Webwatcher does not try to get round bot protection, so try a different page.</span><br><span class="hint">{{.Reason}}</span>{{else if .Reason}}<br><span class="hint">{{.Reason}}</span>{{end}}</td>
+  <td class="actions">
+    {{if .Paused}}
+    <form method="post" action="/watches/{{.ID}}/resume" class="inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button type="submit">Resume</button></form>
+    {{else if .Stopped}}
+    <form method="post" action="/watches/{{.ID}}/resume" class="inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button type="submit">Retry</button></form>
+    {{else}}
+    <form method="post" action="/watches/{{.ID}}/pause" class="inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button type="submit">Pause</button></form>
+    {{end}}
+  </td>
+</tr>
+{{end}}
+</tbody>
+</table>
+</div>
+{{else}}
+<p>Nothing watched yet. Paste a product, holiday or flight page URL above.</p>
+{{end}}
+{{end}}

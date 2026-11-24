@@ -1,0 +1,8 @@
+{{define "content"}}
+<h1>Log in to Webwatcher</h1>
+<p>Press the button to finish logging in on this device.</p>
+<form method="post" action="/auth/{{.Token}}" class="stack">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <button type="submit">Log in</button>
+</form>
+{{end}}

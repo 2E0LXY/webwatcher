@@ -1,0 +1,10 @@
+{{define "content"}}
+<h1>Log in</h1>
+<p>Enter your WhatsApp number and we will send you a one-time login link. No password needed.</p>
+<form method="post" action="/login" class="stack">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <label for="phone">WhatsApp number</label>
+  <input id="phone" name="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="07700 900123 or +44 7700 900123" required maxlength="40">
+  <button type="submit">Send login link</button>
+</form>
+{{end}}

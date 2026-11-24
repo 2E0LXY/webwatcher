@@ -1,0 +1,49 @@
+{{define "content"}}
+{{with .W}}
+<p><a href="/">&larr; All watches</a></p>
+<h1>{{.Title}}</h1>
+<p><a href="{{.URL}}" rel="noopener noreferrer nofollow">{{.URL}}</a></p>
+<dl class="facts">
+  <dt>Last price</dt><dd>{{.Price}}</dd>
+  <dt>Target</dt><dd>{{.Target}}</dd>
+  <dt>Status</dt><dd><span class="badge {{.Status}}">{{.StatusTxt}}</span></dd>
+  {{if .Reason}}<dt>Last problem</dt><dd>{{.Reason}}</dd>{{end}}
+  <dt>Last checked</dt><dd>{{.Checked}}</dd>
+  <dt>Found by</dt><dd>{{if .Method}}{{.Method}}{{else}}–{{end}}</dd>
+  <dt>Check every</dt><dd>{{.Interval}}</dd>
+  {{if .Selector}}<dt>CSS selector</dt><dd><code>{{.Selector}}</code></dd>{{end}}
+</dl>
+{{if eq .Status "blocked"}}<p class="error">This site is blocking automated checks. Webwatcher does not try to get round bot protection, so this page cannot be watched for now.</p>{{end}}
+
+<section class="card">
+<h2>Edit</h2>
+<form method="post" action="/watches/{{.ID}}/edit" class="stack">
+  <input type="hidden" name="csrf" value="{{$.CSRF}}">
+  <label for="target">Target price in pounds (leave empty for none)</label>
+  <input id="target" name="target" inputmode="decimal" maxlength="15" value="{{.TargetVal}}">
+  <label for="interval">Check every</label>
+  <select id="interval" name="interval">{{range $.Intervals}}<option value="{{.Minutes}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}</select>
+  <button type="submit">Save</button>
+</form>
+</section>
+
+<div class="row">
+{{if or .Paused .Stopped}}
+<form method="post" action="/watches/{{.ID}}/resume" class="inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="back" value="watch"><button type="submit">{{if .Paused}}Resume{{else}}Retry{{end}}</button></form>
+{{else}}
+<form method="post" action="/watches/{{.ID}}/pause" class="inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="back" value="watch"><button type="submit">Pause</button></form>
+{{end}}
+<form method="post" action="/watches/{{.ID}}/delete" class="inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button type="submit" class="danger">Delete this watch</button></form>
+</div>
+{{end}}
+
+<h2>Price history</h2>
+{{if .History}}
+<div class="tablewrap">
+<table>
+<thead><tr><th>When</th><th>Price</th><th>Found by</th></tr></thead>
+<tbody>{{range .History}}<tr><td>{{.When}}</td><td>{{.Price}}</td><td>{{.Method}}</td></tr>{{end}}</tbody>
+</table>
+</div>
+{{else}}<p>No prices recorded yet.</p>{{end}}
+{{end}}

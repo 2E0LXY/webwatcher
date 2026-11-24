@@ -1,0 +1,12 @@
+{{define "content"}}
+<h1>Account</h1>
+<p>Logged in as <strong>{{.Phone}}</strong>. You are watching {{.Count}} page{{if ne .Count 1}}s{{end}}.</p>
+<h2>Delete account</h2>
+<p>This erases your number, every watch, all price history and all sessions. It cannot be undone.</p>
+<form method="post" action="/account/delete" class="stack">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <label for="confirm">Type DELETE to confirm</label>
+  <input id="confirm" name="confirm" autocomplete="off" required maxlength="10">
+  <button type="submit" class="danger">Delete my account and data</button>
+</form>
+{{end}}
