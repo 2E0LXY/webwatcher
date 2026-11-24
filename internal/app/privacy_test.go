@@ -309,7 +309,14 @@ func TestDeleteAccountPurgesOutboxAndSessions(t *testing.T) {
 }
 
 func TestPrivacyConfig(t *testing.T) {
-	env := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
+	env := func(m map[string]string) func(string) string {
+		return func(k string) string {
+			if k == "WW_DEV" {
+				return "1"
+			}
+			return m[k]
+		}
+	}
 	c, err := LoadConfig(env(nil))
 	if err != nil || c.RetainHistoryDays != 90 || c.RetainDiagDays != 30 || c.BackupKey != nil || c.RespectRobots {
 		t.Fatalf("%+v %v", c, err)

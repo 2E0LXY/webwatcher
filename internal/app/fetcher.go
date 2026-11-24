@@ -46,8 +46,9 @@ type Conditional struct{ ETag, LastModified string }
 
 // FetchError is a transport-level failure.
 type FetchError struct {
-	Kind string // invalid, ssrf, network
+	Kind string // invalid, ssrf, network, truncated, disallowed, ratelimit
 	Msg  string
+	Wait time.Duration // for ratelimit: how long until the host may be used again
 }
 
 func (e *FetchError) Error() string { return e.Msg }
@@ -68,7 +69,11 @@ type HTTPFetcher struct {
 	rewriteDial func(addr string) string
 
 	robots *robotsCache // nil unless WW_RESPECT_ROBOTS=1
+	hosts  *HostLimiter // shared per-host rate budget, also applied to redirect destinations (nil in some tests)
 }
+
+// SetHostLimiter makes redirects share the scheduler's per-host rate budget.
+func (f *HTTPFetcher) SetHostLimiter(l *HostLimiter) { f.hosts = l }
 
 // SetRespectRobots turns on the opt-in robots.txt check. It is off by default.
 func (f *HTTPFetcher) SetRespectRobots(on bool) {
@@ -132,6 +137,14 @@ func newHTTPFetcher(lookup lookupFunc, blocked func(netip.Addr) bool, rewrite fu
 			if err := f.precheck(req.Context(), req.URL); err != nil {
 				return err
 			}
+			// A redirect to another host is a request to that host: it draws
+			// on that host's budget like any other check would.
+			if f.hosts != nil && !seenHost(via, req.URL) {
+				if ok, wait := f.hosts.Reserve(req.URL.Hostname()); !ok {
+					return &FetchError{Kind: "ratelimit", Wait: wait,
+						Msg: "the page redirects to " + strings.ToLower(req.URL.Hostname()) + ", which was contacted too recently; will retry later"}
+				}
+			}
 			return f.robotsCheck(req.Context(), req.URL)
 		},
 	}
@@ -151,6 +164,15 @@ func (f *HTTPFetcher) precheck(ctx context.Context, u *url.URL) error {
 		return &FetchError{Kind: "network", Msg: err.Error()}
 	}
 	return nil
+}
+
+func seenHost(via []*http.Request, u *url.URL) bool {
+	for _, r := range via {
+		if strings.EqualFold(r.URL.Hostname(), u.Hostname()) {
+			return true
+		}
+	}
+	return false
 }
 
 func cloneURL(u *url.URL) *url.URL { c := *u; return &c }
@@ -194,8 +216,13 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, rawURL string, cond *Conditiona
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxBodyBytes+1))
-	if err != nil && len(body) == 0 {
-		return nil, &FetchError{Kind: "network", Msg: "network error reading body: " + shortErr(err)}
+	if err != nil {
+		// A partial body is never parsed: half a page can hold a wrong price.
+		return nil, &FetchError{Kind: "truncated", Msg: "the connection ended before the whole page arrived; it was not parsed (" + shortErr(err) + ")"}
+	}
+	if cl := resp.ContentLength; cl >= 0 && len(body) <= MaxBodyBytes && int64(len(body)) != cl &&
+		resp.StatusCode != http.StatusNotModified && resp.StatusCode != http.StatusNoContent {
+		return nil, &FetchError{Kind: "truncated", Msg: "the page length did not match what the site announced; it was not parsed"}
 	}
 	p := &Page{NotModified: resp.StatusCode == http.StatusNotModified && cond != nil, URL: resp.Request.URL.String(), Status: resp.StatusCode, ContentType: resp.Header.Get("Content-Type"), Header: resp.Header}
 	if len(body) > MaxBodyBytes {

@@ -176,7 +176,15 @@ func hostOf(raw string) string {
 	return ""
 }
 
+// Limiter returns the per-host rate budget, so the fetcher can share it.
+func (s *Scheduler) Limiter() *HostLimiter { return s.hosts }
+
 func (s *Scheduler) onFailure(ctx context.Context, w *Watch, fail *CheckFailure) {
+	if fail.Status == "deferred" {
+		// Not a fault: try again once the other host's budget allows.
+		s.store.Defer(w.ID, s.clock.Now().Add(fail.RetryAfter+2*time.Second+s.jitter(10*time.Second)).Unix())
+		return
+	}
 	failures := w.Failures + 1
 	if fail.Status == "disallowed" {
 		failures = w.Failures // a policy outcome, not a fault: never counts towards stopping the watch

@@ -67,16 +67,28 @@ func (s *Store) finishOutbox(id int64, status string, attempts int, next int64, 
 	return err
 }
 
-// sendsSince counts send attempts since t (the global budget window).
-func (s *Store) sendsSince(t int64) (int, error) {
-	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM send_log WHERE at>?`, t).Scan(&n)
-	return n, err
-}
-
-func (s *Store) logSend() error {
-	_, err := s.db.Exec(`INSERT INTO send_log(at) VALUES(?)`, s.now())
-	return err
+// TryReserveSend claims one outbound message in the rolling-hour global budget.
+// It fails if the hour's total has reached total, or the hour's count for this
+// kind has reached kindLimit (so login links cannot use up the alert budget).
+// Check and claim happen in one transaction.
+func (s *Store) TryReserveSend(kind string, kindLimit, total int) (bool, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	since := s.now() - 3600
+	var all, mine int
+	if err := tx.QueryRow(`SELECT COUNT(*), COALESCE(SUM(kind=?),0) FROM send_log WHERE at>?`, kind, since).Scan(&all, &mine); err != nil {
+		return false, err
+	}
+	if all >= total || mine >= kindLimit {
+		return false, nil
+	}
+	if _, err := tx.Exec(`INSERT INTO send_log(at, kind) VALUES(?,?)`, s.now(), kind); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
 }
 
 // OutboxCounts returns the number of rows per status (for tests and diagnostics).
@@ -159,17 +171,13 @@ func (s *Sender) RunOnce(ctx context.Context) int {
 			s.store.finishOutbox(r.ID, OutSuppressed, r.Attempts, 0, "watch was paused or edited after the alert was queued")
 			continue
 		}
-		n, err := s.store.sendsSince(s.clock.Now().Add(-time.Hour).Unix())
+		ok, err := s.store.TryReserveSend("alert", s.budget, s.budget)
 		if err != nil {
-			slog.Error("outbox: budget", "err", err)
+			slog.Error("outbox: budget", "err", RedactPII(err.Error()))
 			break
 		}
-		if n >= s.budget {
+		if !ok {
 			slog.Warn("outbox: hourly send budget reached; alerts stay queued", "budget", s.budget)
-			break
-		}
-		if err := s.store.logSend(); err != nil {
-			slog.Error("outbox: budget log", "err", err)
 			break
 		}
 		sctx, cancel := context.WithTimeout(ctx, 30*time.Second)

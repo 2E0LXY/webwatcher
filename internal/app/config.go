@@ -112,6 +112,14 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return c, fmt.Errorf("WW_BASE_URL must be an http(s) URL, got %q", c.BaseURL)
 	}
+	// Fail closed: production must not run on plain HTTP or on the log
+	// messenger, which writes login links to the log.
+	if !c.Dev && u.Scheme != "https" {
+		return c, fmt.Errorf("WW_BASE_URL must be https (got %q); plain http is only allowed with WW_DEV=1", c.BaseURL)
+	}
+	if c.Messenger == "log" && (!c.Dev || u.Scheme == "https") {
+		return c, errors.New("WW_MESSENGER=log is for local development only: it needs WW_DEV=1 and an http WW_BASE_URL; set WW_MESSENGER=meta or twilio for production")
+	}
 	switch c.Messenger {
 	case "log":
 	case "meta":

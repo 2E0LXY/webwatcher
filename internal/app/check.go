@@ -18,6 +18,7 @@ type CheckFailure struct {
 	//   noprice    the page was fetched but holds no price we can read
 	//   disallowed robots.txt forbids the page (only with WW_RESPECT_ROBOTS=1)
 	// None of them touches the last valid observation.
+	//   deferred   a redirect target's per-host rate budget was exhausted; retry later, not a fault
 	Status     string
 	Reason     string
 	RetryAfter time.Duration // from a Retry-After header on 429/503; 0 if none
@@ -91,6 +92,9 @@ func checkPageAt(p *Page, selector string, now time.Time) (*Result, *CheckFailur
 	case p.Status < 200 || p.Status >= 300:
 		return nil, &CheckFailure{"error", fmt.Sprintf("site returned HTTP %d", p.Status), ra}
 	}
+	if p.Truncated {
+		return nil, &CheckFailure{"error", fmt.Sprintf("the page is larger than %d MB; it was cut off and not parsed", MaxBodyBytes>>20), 0}
+	}
 	res, err := Extract(p.Body, selector)
 	if err == nil {
 		res.ETag, res.LastModified = p.Header.Get("Etag"), p.Header.Get("Last-Modified")
@@ -112,8 +116,11 @@ func CheckURL(ctx context.Context, f Fetcher, rawURL, selector string, cond *Con
 	if err != nil {
 		var fe *FetchError
 		if errors.As(err, &fe) {
-			if fe.Kind == "disallowed" {
+			switch fe.Kind {
+			case "disallowed":
 				return nil, &CheckFailure{"disallowed", fe.Msg, 0}
+			case "ratelimit":
+				return nil, &CheckFailure{"deferred", fe.Msg, fe.Wait}
 			}
 			return nil, &CheckFailure{"error", fe.Msg, 0}
 		}

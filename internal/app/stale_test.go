@@ -102,6 +102,7 @@ func TestStaleStoreLevelGuard(t *testing.T) {
 			t.Errorf("%s did not bump the version", name)
 		}
 	}
+	e.st.SetPaused(e.uid, id, false) // map order above is random; make sure it ends resumed
 	// interval edits are not alert-relevant and must not invalidate queued alerts
 	w, _ = e.st.WatchByID(id, e.uid)
 	e.st.SetInterval(e.uid, id, 360)

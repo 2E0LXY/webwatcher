@@ -83,10 +83,8 @@ func run() error {
 	if cfg.BackupKey == nil {
 		slog.Warn("WW_BACKUP_KEY is not set: backups are written unencrypted (file mode 0600, kept 7 days)")
 	}
-	if cfg.Messenger == "log" && !cfg.Dev {
-		slog.Warn("WW_MESSENGER=log writes login links to the log; use it for development only")
-	}
 	auth := app.NewAuth(store, msgr, clock, cfg.BaseURL)
+	auth.SetSendBudget(cfg.SendBudget)
 	srv, err := app.NewServer(cfg, store, auth, msgr, clock)
 	if err != nil {
 		return err
@@ -94,6 +92,7 @@ func run() error {
 	fetcher := app.NewHTTPFetcher()
 	fetcher.SetRespectRobots(cfg.RespectRobots)
 	sched := app.NewScheduler(store, fetcher, clock, cfg.BaseURL)
+	fetcher.SetHostLimiter(sched.Limiter())
 	sender := app.NewSender(store, msgr, clock, cfg.SendBudget)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

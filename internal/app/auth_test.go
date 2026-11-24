@@ -226,7 +226,7 @@ func TestBackupAndPrune(t *testing.T) {
 
 func TestConfig(t *testing.T) {
 	env := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
-	c, err := LoadConfig(env(map[string]string{}))
+	c, err := LoadConfig(env(map[string]string{"WW_DEV": "1"}))
 	if err != nil || c.Addr != "127.0.0.1:8780" || c.Messenger != "log" {
 		t.Fatalf("%+v %v", c, err)
 	}
@@ -236,8 +236,46 @@ func TestConfig(t *testing.T) {
 	if _, err := LoadConfig(env(map[string]string{"WW_MESSENGER": "pigeon"})); err == nil {
 		t.Fatal("unknown messenger accepted")
 	}
-	c, _ = LoadConfig(env(map[string]string{"WW_BASE_URL": "https://ww.example/"}))
+	c, _ = LoadConfig(env(map[string]string{"WW_BASE_URL": "https://ww.example/", "WW_MESSENGER": "meta", "WW_WA_PHONE_ID": "1", "WW_WA_TOKEN": "t"}))
 	if c.BaseURL != "https://ww.example" || !c.SecureCookies() {
 		t.Fatal("base url")
+	}
+}
+
+func TestConfigFailsClosedInProduction(t *testing.T) {
+	env := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
+	meta := map[string]string{"WW_MESSENGER": "meta", "WW_WA_PHONE_ID": "1", "WW_WA_TOKEN": "t"}
+	with := func(extra map[string]string) map[string]string {
+		m := map[string]string{}
+		for k, v := range meta {
+			m[k] = v
+		}
+		for k, v := range extra {
+			m[k] = v
+		}
+		return m
+	}
+	bad := map[string]map[string]string{
+		"defaults (log messenger, http, no dev)": {},
+		"log messenger with https base":          {"WW_BASE_URL": "https://ww.example", "WW_MESSENGER": "log"},
+		"log messenger with https even in dev":   {"WW_BASE_URL": "https://ww.example", "WW_MESSENGER": "log", "WW_DEV": "1"},
+		"log messenger without dev":              {"WW_BASE_URL": "http://ww.example", "WW_MESSENGER": "log"},
+		"http base without dev":                  with(map[string]string{"WW_BASE_URL": "http://ww.example"}),
+		"no base url (defaults to http) no dev":  with(nil),
+	}
+	for name, m := range bad {
+		if _, err := LoadConfig(env(m)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	good := map[string]map[string]string{
+		"production":              with(map[string]string{"WW_BASE_URL": "https://ww.example"}),
+		"dev with log over http":  {"WW_DEV": "1", "WW_MESSENGER": "log"},
+		"dev with real messenger": with(map[string]string{"WW_DEV": "1"}),
+	}
+	for name, m := range good {
+		if _, err := LoadConfig(env(m)); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }

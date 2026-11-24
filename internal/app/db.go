@@ -128,6 +128,7 @@ var migrations = []string{
 	CREATE INDEX check_log_watch ON check_log(watch_id, id);`,
 	`ALTER TABLE watches ADD COLUMN version INTEGER NOT NULL DEFAULT 0;
 	ALTER TABLE outbox ADD COLUMN watch_version INTEGER NOT NULL DEFAULT 0;`,
+	`ALTER TABLE send_log ADD COLUMN kind TEXT NOT NULL DEFAULT 'alert';`,
 }
 
 // OpenDB opens (creating if needed) the SQLite database in dir and migrates it.
