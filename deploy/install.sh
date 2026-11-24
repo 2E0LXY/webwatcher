@@ -223,6 +223,10 @@ if [ -n "$DOMAIN" ]; then
 				say "added an import line to $CADDYFILE"
 			fi
 			if caddy validate --config "$CADDYFILE" --adapter caddyfile >"$TMP/validate.log" 2>&1; then
+				# Validating as root creates the log file owned by root, which Caddy then cannot open.
+				if id caddy >/dev/null 2>&1; then
+					for f in /var/log/caddy/*.log; do [ -e "$f" ] && chown caddy:caddy "$f"; done
+				fi
 				systemctl reload caddy && say "Caddy reloaded"
 			else
 				cat "$TMP/validate.log" >&2
