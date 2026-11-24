@@ -25,6 +25,7 @@ const (
 // Page is the result of fetching a URL. Non-2xx statuses are returned as
 // pages, not errors, so the caller can classify them.
 type Page struct {
+	NotModified bool // 304 in answer to a conditional request
 	URL         string
 	Status      int
 	ContentType string
@@ -36,8 +37,12 @@ type Page struct {
 // Fetcher retrieves a page. The interface exists so a headless-browser
 // implementation can be added later.
 type Fetcher interface {
-	Fetch(ctx context.Context, rawURL string) (*Page, error)
+	// cond, if not nil, makes the request conditional (If-None-Match / If-Modified-Since).
+	Fetch(ctx context.Context, rawURL string, cond *Conditional) (*Page, error)
 }
+
+// Conditional holds the validators from the last good fetch.
+type Conditional struct{ ETag, LastModified string }
 
 // FetchError is a transport-level failure.
 type FetchError struct {
@@ -61,6 +66,17 @@ type HTTPFetcher struct {
 	blocked func(netip.Addr) bool
 	// test hooks (nil in production)
 	rewriteDial func(addr string) string
+
+	robots *robotsCache // nil unless WW_RESPECT_ROBOTS=1
+}
+
+// SetRespectRobots turns on the opt-in robots.txt check. It is off by default.
+func (f *HTTPFetcher) SetRespectRobots(on bool) {
+	if on {
+		f.robots = newRobotsCache()
+	} else {
+		f.robots = nil
+	}
 }
 
 func NewHTTPFetcher() *HTTPFetcher {
@@ -113,7 +129,10 @@ func newHTTPFetcher(lookup lookupFunc, blocked func(netip.Addr) bool, rewrite fu
 			if len(via) > MaxRedirects {
 				return fmt.Errorf("stopped after %d redirects", MaxRedirects)
 			}
-			return f.precheck(req.Context(), req.URL)
+			if err := f.precheck(req.Context(), req.URL); err != nil {
+				return err
+			}
+			return f.robotsCheck(req.Context(), req.URL)
 		},
 	}
 	return f
@@ -136,12 +155,15 @@ func (f *HTTPFetcher) precheck(ctx context.Context, u *url.URL) error {
 
 func cloneURL(u *url.URL) *url.URL { c := *u; return &c }
 
-func (f *HTTPFetcher) Fetch(ctx context.Context, rawURL string) (*Page, error) {
+func (f *HTTPFetcher) Fetch(ctx context.Context, rawURL string, cond *Conditional) (*Page, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return nil, &FetchError{Kind: "invalid", Msg: "invalid URL"}
 	}
 	if err := f.precheck(ctx, u); err != nil {
+		return nil, err
+	}
+	if err := f.robotsCheck(ctx, u); err != nil {
 		return nil, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
@@ -151,6 +173,14 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, rawURL string) (*Page, error) {
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5")
 	req.Header.Set("Accept-Language", "en-GB,en;q=0.8")
+	if cond != nil {
+		if cond.ETag != "" {
+			req.Header.Set("If-None-Match", cond.ETag)
+		}
+		if cond.LastModified != "" {
+			req.Header.Set("If-Modified-Since", cond.LastModified)
+		}
+	}
 	resp, err := f.client.Do(req)
 	if err != nil {
 		var fe *FetchError
@@ -167,7 +197,7 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, rawURL string) (*Page, error) {
 	if err != nil && len(body) == 0 {
 		return nil, &FetchError{Kind: "network", Msg: "network error reading body: " + shortErr(err)}
 	}
-	p := &Page{URL: resp.Request.URL.String(), Status: resp.StatusCode, ContentType: resp.Header.Get("Content-Type"), Header: resp.Header}
+	p := &Page{NotModified: resp.StatusCode == http.StatusNotModified && cond != nil, URL: resp.Request.URL.String(), Status: resp.StatusCode, ContentType: resp.Header.Get("Content-Type"), Header: resp.Header}
 	if len(body) > MaxBodyBytes {
 		body, p.Truncated = body[:MaxBodyBytes], true
 	}

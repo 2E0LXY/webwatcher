@@ -17,6 +17,11 @@ type Result struct {
 	Method     string // selector, jsonld, meta, regex
 	Basis      string // BasisPerPerson, BasisTotal or BasisUnknown
 	SoldOut    bool   // the page says the item is out of stock (JSON-LD availability)
+
+	// Set by CheckPage, not the extractors.
+	NotModified  bool   // 304: nothing to extract, the last observation stands
+	ETag         string // validators of this response, for the next conditional GET
+	LastModified string
 }
 
 // Price bases. A price per person and a price for the whole party must never

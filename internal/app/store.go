@@ -252,12 +252,14 @@ type Watch struct {
 	ObsCurrency    string
 	ObsBasis       string
 	SoldOut        bool
+	ETag           string
+	LastModified   string
 }
 
 const watchCols = `w.id,w.user_id,w.url,w.label,w.selector,w.target_pence,w.interval_min,w.paused,w.status,
 	w.last_price_pence,w.alert_base_pence,w.currency,w.last_method,w.last_error,w.last_checked_at,
 	w.next_check_at,w.failures,w.failure_notified,w.created_at,u.phone,(u.alerts_enabled=1 AND u.consent_at IS NOT NULL),
-	w.basis,w.basis_changed,w.obs_price_pence,w.obs_currency,w.obs_basis,w.sold_out`
+	w.basis,w.basis_changed,w.obs_price_pence,w.obs_currency,w.obs_basis,w.sold_out,w.etag,w.last_modified`
 
 type rowScanner interface{ Scan(...any) error }
 
@@ -267,7 +269,7 @@ func scanWatch(r rowScanner) (*Watch, error) {
 	err := r.Scan(&w.ID, &w.UserID, &w.URL, &w.Label, &w.Selector, &w.TargetPence, &w.IntervalMin, &paused, &w.Status,
 		&w.LastPricePence, &w.AlertBase, &w.Currency, &w.LastMethod, &w.LastError, &w.LastCheckedAt,
 		&w.NextCheckAt, &w.Failures, &fn, &w.CreatedAt, &w.Phone, &ao,
-		&w.Basis, &bc, &w.ObsPence, &w.ObsCurrency, &w.ObsBasis, &so)
+		&w.Basis, &bc, &w.ObsPence, &w.ObsCurrency, &w.ObsBasis, &so, &w.ETag, &w.LastModified)
 	w.Paused, w.FailureNotif, w.AlertsOn, w.BasisChanged, w.SoldOut = paused != 0, fn != 0, ao != 0, bc != 0, so != 0
 	return &w, err
 }
@@ -379,7 +381,7 @@ func (s *Store) SetPaused(uid, id int64, paused bool) error {
 		return s.exec1(uid, id, `UPDATE watches SET paused=1`)
 	}
 	if err := s.exec1(uid, id, `UPDATE watches SET paused=0, failures=0, failure_notified=0,
-		status=CASE WHEN status IN ('blocked','error') THEN 'pending' ELSE status END, next_check_at=?`, s.now()); err != nil {
+		status=CASE WHEN status IN ('blocked','error','noprice','disallowed') THEN 'pending' ELSE status END, next_check_at=?`, s.now()); err != nil {
 		return err
 	}
 	// A fresh run of failures may send a fresh stop notice.
@@ -429,10 +431,18 @@ func (s *Store) RecordSuccess(id int64, price int64, cur, method string, next in
 
 // Observation is one extracted price with what it is a price of.
 type Observation struct {
-	Price    int64
-	Currency string
-	Method   string
-	Basis    string
+	Price        int64
+	Currency     string
+	Method       string
+	Basis        string
+	ETag         string
+	LastModified string
+}
+
+// logCheck appends a diagnostics row. detail never holds URLs or numbers.
+func logCheck(tx *sql.Tx, id, now int64, outcome, detail string) error {
+	_, err := tx.Exec(`INSERT INTO check_log(watch_id, checked_at, outcome, detail) VALUES(?,?,?,?)`, id, now, outcome, RedactPII(detail))
+	return err
 }
 
 // RecordObservation is RecordSuccess for a comparable observation.
@@ -446,8 +456,11 @@ func (s *Store) RecordObservation(id int64, o Observation, next int64, base *int
 	now := s.now()
 	if _, err := tx.Exec(`UPDATE watches SET status='ok', last_price_pence=?, currency=?, basis=?, last_method=?, last_error='',
 		last_checked_at=?, next_check_at=?, failures=0, failure_notified=0, alert_base_pence=?, sold_out=0,
-		basis_changed=0, obs_price_pence=NULL, obs_currency='', obs_basis='' WHERE id=?`,
-		price, cur, o.Basis, method, now, next, base, id); err != nil {
+		basis_changed=0, obs_price_pence=NULL, obs_currency='', obs_basis='', etag=?, last_modified=? WHERE id=?`,
+		price, cur, o.Basis, method, now, next, base, o.ETag, o.LastModified, id); err != nil {
+		return err
+	}
+	if err := logCheck(tx, id, now, "ok", method); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`INSERT INTO price_history(watch_id, price_pence, currency, basis, method, checked_at) VALUES(?,?,?,?,?,?)`,
@@ -478,8 +491,11 @@ func (s *Store) RecordBasisChange(id int64, o Observation, next int64) error {
 	defer tx.Rollback()
 	now := s.now()
 	if _, err := tx.Exec(`UPDATE watches SET status='ok', last_error='', last_method=?, last_checked_at=?, next_check_at=?,
-		failures=0, failure_notified=0, sold_out=0, basis_changed=1, obs_price_pence=?, obs_currency=?, obs_basis=? WHERE id=?`,
-		o.Method, now, next, o.Price, o.Currency, o.Basis, id); err != nil {
+		failures=0, failure_notified=0, sold_out=0, basis_changed=1, obs_price_pence=?, obs_currency=?, obs_basis=?, etag=?, last_modified=? WHERE id=?`,
+		o.Method, now, next, o.Price, o.Currency, o.Basis, o.ETag, o.LastModified, id); err != nil {
+		return err
+	}
+	if err := logCheck(tx, id, now, "basis_changed", o.Method); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`INSERT INTO price_history(watch_id, price_pence, currency, basis, method, checked_at) VALUES(?,?,?,?,?,?)`,
@@ -507,9 +523,39 @@ func (s *Store) ConfirmBasis(uid, id int64) error {
 // RecordSoldOut notes that the page says the item is sold out. The last valid
 // price, baseline and alert state are kept and no price is recorded.
 func (s *Store) RecordSoldOut(id int64, next int64) error {
-	_, err := s.db.Exec(`UPDATE watches SET status='ok', sold_out=1, last_error='', last_checked_at=?, next_check_at=?, failures=0, failure_notified=0 WHERE id=?`,
-		s.now(), next, id)
-	return err
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := s.now()
+	if _, err := tx.Exec(`UPDATE watches SET status='ok', sold_out=1, last_error='', last_checked_at=?, next_check_at=?, failures=0, failure_notified=0 WHERE id=?`,
+		now, next, id); err != nil {
+		return err
+	}
+	if err := logCheck(tx, id, now, "sold_out", ""); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// RecordNotModified notes a successful conditional GET answered with 304: the
+// page is unchanged, so the last valid observation stands.
+func (s *Store) RecordNotModified(id int64, next int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := s.now()
+	if _, err := tx.Exec(`UPDATE watches SET status='ok', last_error='', last_checked_at=?, next_check_at=?, failures=0, failure_notified=0 WHERE id=?`,
+		now, next, id); err != nil {
+		return err
+	}
+	if err := logCheck(tx, id, now, "not_modified", ""); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // RecordFailure stores a failed check. status is one of error, blocked, stopped.
@@ -523,6 +569,9 @@ func (s *Store) RecordFailure(id int64, status, reason string, failures int, nex
 	now := s.now()
 	if _, err := tx.Exec(`UPDATE watches SET status=?, last_error=?, failures=?, last_checked_at=?, next_check_at=? WHERE id=?`,
 		status, reason, failures, now, next, id); err != nil {
+		return err
+	}
+	if err := logCheck(tx, id, now, status, reason); err != nil {
 		return err
 	}
 	if notice != nil {

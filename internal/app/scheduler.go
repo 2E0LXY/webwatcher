@@ -113,7 +113,11 @@ func (s *Scheduler) interval(w *Watch) time.Duration {
 func (s *Scheduler) check(ctx context.Context, w *Watch) {
 	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	res, fail := CheckURL(cctx, s.fetcher, w.URL, w.Selector)
+	var cond *Conditional
+	if w.Status == "ok" && w.LastPricePence != nil && (w.ETag != "" || w.LastModified != "") {
+		cond = &Conditional{ETag: w.ETag, LastModified: w.LastModified}
+	}
+	res, fail := CheckURL(cctx, s.fetcher, w.URL, w.Selector, cond)
 	if ctx.Err() != nil {
 		return // shutting down; do not record a bogus failure
 	}
@@ -125,7 +129,14 @@ func (s *Scheduler) check(ctx context.Context, w *Watch) {
 }
 
 func (s *Scheduler) onSuccess(ctx context.Context, w *Watch, res *Result) {
-	obs := Observation{Price: res.PricePence, Currency: res.Currency, Method: res.Method, Basis: res.Basis}
+	if res.NotModified {
+		iv := s.interval(w)
+		if err := s.store.RecordNotModified(w.ID, s.clock.Now().Add(iv+s.jitter(iv)).Unix()); err != nil {
+			slog.Error("record not modified", "watch", w.ID, "host", hostOf(w.URL), "err", err)
+		}
+		return
+	}
+	obs := Observation{Price: res.PricePence, Currency: res.Currency, Method: res.Method, Basis: res.Basis, ETag: res.ETag, LastModified: res.LastModified}
 	if obs.Basis == "" {
 		obs.Basis = BasisUnknown
 	}
@@ -168,6 +179,9 @@ func hostOf(raw string) string {
 
 func (s *Scheduler) onFailure(ctx context.Context, w *Watch, fail *CheckFailure) {
 	failures := w.Failures + 1
+	if fail.Status == "disallowed" {
+		failures = w.Failures // a policy outcome, not a fault: never counts towards stopping the watch
+	}
 	iv := s.interval(w)
 	// exponential backoff: interval * 2^failures, capped at 24h (or the interval if longer)
 	delay := iv
@@ -176,6 +190,10 @@ func (s *Scheduler) onFailure(ctx context.Context, w *Watch, fail *CheckFailure)
 		delay *= 2
 	}
 	delay = min(delay, limit)
+	if fail.Status == "disallowed" {
+		delay = max(iv, 24*time.Hour) // robots.txt is cached for 24 hours anyway
+	}
+	delay = max(delay, fail.RetryAfter) // always honour Retry-After
 	next := s.clock.Now().Add(delay + s.jitter(delay)).Unix()
 	var notice *QueuedAlert
 	if failures >= MaxFailures && !w.FailureNotif && w.AlertsOn {

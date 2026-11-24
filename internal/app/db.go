@@ -112,6 +112,17 @@ var migrations = []string{
 	ALTER TABLE watches ADD COLUMN obs_basis TEXT NOT NULL DEFAULT '';
 	ALTER TABLE price_history ADD COLUMN basis TEXT NOT NULL DEFAULT 'unknown';
 	ALTER TABLE watches ADD COLUMN sold_out INTEGER NOT NULL DEFAULT 0;`,
+	`ALTER TABLE watches ADD COLUMN etag TEXT NOT NULL DEFAULT '';
+	ALTER TABLE watches ADD COLUMN last_modified TEXT NOT NULL DEFAULT '';
+	CREATE TABLE check_log (
+		id INTEGER PRIMARY KEY,
+		watch_id INTEGER NOT NULL REFERENCES watches(id) ON DELETE CASCADE,
+		checked_at INTEGER NOT NULL,
+		outcome TEXT NOT NULL,
+		detail TEXT NOT NULL DEFAULT ''
+	);
+	CREATE INDEX check_log_at ON check_log(checked_at);
+	CREATE INDEX check_log_watch ON check_log(watch_id, id);`,
 }
 
 // OpenDB opens (creating if needed) the SQLite database in dir and migrates it.

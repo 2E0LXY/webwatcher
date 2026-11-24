@@ -15,13 +15,14 @@ type fakeFetcher struct {
 	pages  map[string][]*Page // queue per URL; last element repeats
 	errs   map[string]error
 	calls  map[string]int
+	conds  map[string][]*Conditional
 	hold   chan struct{}
 	cur    atomic.Int32
 	maxCur atomic.Int32
 }
 
 func newFakeFetcher() *fakeFetcher {
-	return &fakeFetcher{pages: map[string][]*Page{}, errs: map[string]error{}, calls: map[string]int{}}
+	return &fakeFetcher{pages: map[string][]*Page{}, errs: map[string]error{}, calls: map[string]int{}, conds: map[string][]*Conditional{}}
 }
 
 func pricePage(pence int64) *Page {
@@ -35,7 +36,7 @@ func (f *fakeFetcher) set(u string, pages ...*Page) {
 	f.mu.Unlock()
 }
 
-func (f *fakeFetcher) Fetch(ctx context.Context, u string) (*Page, error) {
+func (f *fakeFetcher) Fetch(ctx context.Context, u string, cond *Conditional) (*Page, error) {
 	n := f.cur.Add(1)
 	defer f.cur.Add(-1)
 	for {
@@ -50,6 +51,7 @@ func (f *fakeFetcher) Fetch(ctx context.Context, u string) (*Page, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls[u]++
+	f.conds[u] = append(f.conds[u], cond)
 	if err := f.errs[u]; err != nil {
 		return nil, err
 	}
@@ -226,8 +228,8 @@ func TestSchedulerFailureReasons(t *testing.T) {
 		reason string
 	}{
 		"https://a.example.com/": {&Page{Status: 429, Header: http.Header{}}, "blocked", "blocked by site (HTTP 429)"},
-		"https://b.example.com/": {&Page{Status: 200, Header: http.Header{}, Body: fixture(t, "spa.html")}, "error", "needs browser rendering (the page builds its prices with JavaScript)"},
-		"https://c.example.com/": {&Page{Status: 200, Header: http.Header{}, Body: fixture(t, "noprice.html")}, "error", "no price found"},
+		"https://b.example.com/": {&Page{Status: 200, Header: http.Header{}, Body: fixture(t, "spa.html")}, "noprice", "needs browser rendering (the page builds its prices with JavaScript)"},
+		"https://c.example.com/": {&Page{Status: 200, Header: http.Header{}, Body: fixture(t, "noprice.html")}, "noprice", "no price found"},
 	}
 	ids := map[string]int64{}
 	for u, c := range cases {

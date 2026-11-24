@@ -116,8 +116,8 @@ func TestCheckPageClassification(t *testing.T) {
 		{"403", Page{Status: 403, Header: hdr()}, "blocked", "blocked by site (HTTP 403)"},
 		{"429", Page{Status: 429, Header: hdr()}, "blocked", "blocked by site (HTTP 429)"},
 		{"cloudflare 200", Page{Status: 200, Header: hdr(), Body: fixture(t, "cloudflare.html")}, "blocked", "blocked by site (bot challenge page)"},
-		{"spa", Page{Status: 200, Header: hdr(), Body: fixture(t, "spa.html")}, "error", "needs browser rendering (the page builds its prices with JavaScript)"},
-		{"no price", Page{Status: 200, Header: hdr(), Body: fixture(t, "noprice.html")}, "error", "no price found"},
+		{"spa", Page{Status: 200, Header: hdr(), Body: fixture(t, "spa.html")}, "noprice", "needs browser rendering (the page builds its prices with JavaScript)"},
+		{"no price", Page{Status: 200, Header: hdr(), Body: fixture(t, "noprice.html")}, "noprice", "no price found"},
 		{"500", Page{Status: 500, Header: hdr()}, "error", "site returned HTTP 500"},
 		{"404", Page{Status: 404, Header: hdr()}, "error", "site returned HTTP 404"},
 	}

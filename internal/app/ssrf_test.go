@@ -81,7 +81,7 @@ func TestFetchOK(t *testing.T) {
 	}))
 	defer srv.Close()
 	f := fetcherFor(srv, map[string]string{"shop.test": "127.0.0.1"})
-	p, err := f.Fetch(context.Background(), "http://shop.test/p")
+	p, err := f.Fetch(context.Background(), "http://shop.test/p", nil)
 	if err != nil || p.Status != 200 || string(p.Body) != "<html>hi</html>" {
 		t.Fatalf("%v %+v", err, p)
 	}
@@ -96,7 +96,7 @@ func TestFetchBodyCap(t *testing.T) {
 	}))
 	defer srv.Close()
 	f := fetcherFor(srv, map[string]string{"shop.test": "127.0.0.1"})
-	p, err := f.Fetch(context.Background(), "http://shop.test/")
+	p, err := f.Fetch(context.Background(), "http://shop.test/", nil)
 	if err != nil || len(p.Body) != MaxBodyBytes || !p.Truncated {
 		t.Fatalf("%v len=%d trunc=%v", err, len(p.Body), p != nil && p.Truncated)
 	}
@@ -108,7 +108,7 @@ func TestFetchBlocksPrivateStartHost(t *testing.T) {
 	defer srv.Close()
 	f := fetcherFor(srv, map[string]string{"internal.test": "10.0.0.5", "meta.test": "169.254.169.254"})
 	for _, h := range []string{"internal.test", "meta.test"} {
-		_, err := f.Fetch(context.Background(), "http://"+h+"/")
+		_, err := f.Fetch(context.Background(), "http://"+h+"/", nil)
 		var fe *FetchError
 		if !errors.As(err, &fe) || fe.Kind != "ssrf" {
 			t.Errorf("%s: %v", h, err)
@@ -147,20 +147,20 @@ func TestFetchRedirects(t *testing.T) {
 	f := fetcherFor(srv, map[string]string{"shop.test": "127.0.0.1", "internal.test": "192.168.0.10"})
 
 	for _, path := range []string{"/to-private", "/to-ip", "/to-port", "/to-file"} {
-		p, err := f.Fetch(context.Background(), "http://shop.test"+path)
+		p, err := f.Fetch(context.Background(), "http://shop.test"+path, nil)
 		if err == nil {
 			t.Errorf("%s: redirect followed, status %d", path, p.Status)
 		}
 	}
-	_, err := f.Fetch(context.Background(), "http://shop.test/to-private")
+	_, err := f.Fetch(context.Background(), "http://shop.test/to-private", nil)
 	var fe *FetchError
 	if !errors.As(err, &fe) || fe.Kind != "ssrf" {
 		t.Errorf("redirect to private: want ssrf FetchError, got %v", err)
 	}
-	if _, err := f.Fetch(context.Background(), "http://shop.test/loop"); err == nil || hits.Load() > MaxRedirects+1 {
+	if _, err := f.Fetch(context.Background(), "http://shop.test/loop", nil); err == nil || hits.Load() > MaxRedirects+1 {
 		t.Errorf("redirect loop: err=%v hits=%d", err, hits.Load())
 	}
-	if p, err := f.Fetch(context.Background(), "http://shop.test/hop"); err != nil || string(p.Body) != "done" {
+	if p, err := f.Fetch(context.Background(), "http://shop.test/hop", nil); err != nil || string(p.Body) != "done" {
 		t.Errorf("benign redirect: %v", err)
 	}
 }
@@ -180,7 +180,7 @@ func TestFetchDNSRebinding(t *testing.T) {
 	}
 	addr := strings.TrimPrefix(srv.URL, "http://")
 	f := newHTTPFetcher(lookup, IsBlockedIP, func(string) string { return addr })
-	_, err := f.Fetch(context.Background(), "http://rebind.example.com/")
+	_, err := f.Fetch(context.Background(), "http://rebind.example.com/", nil)
 	var fe *FetchError
 	if !errors.As(err, &fe) || fe.Kind != "ssrf" {
 		t.Fatalf("want ssrf, got %v", err)

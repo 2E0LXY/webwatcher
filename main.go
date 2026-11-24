@@ -57,7 +57,9 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	sched := app.NewScheduler(store, app.NewHTTPFetcher(), clock, cfg.BaseURL)
+	fetcher := app.NewHTTPFetcher()
+	fetcher.SetRespectRobots(cfg.RespectRobots)
+	sched := app.NewScheduler(store, fetcher, clock, cfg.BaseURL)
 	sender := app.NewSender(store, msgr, clock, cfg.SendBudget)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

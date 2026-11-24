@@ -281,6 +281,7 @@ type watchView struct {
 	Selector     string
 	Failures     int
 	SoldOut      bool
+	Kept         bool // a check failed but the last valid price is still shown
 	BasisChanged bool
 	BasisNote    string
 }
@@ -397,6 +398,7 @@ func (s *Server) view(w *Watch) watchView {
 	}
 	v.Stopped = w.Failures >= MaxFailures
 	v.SoldOut = w.SoldOut
+	v.Kept = w.LastPricePence != nil && (w.Status == "error" || w.Status == "noprice")
 	if w.LastPricePence != nil {
 		v.Price += basisSuffix(w.Basis)
 	}
@@ -416,8 +418,12 @@ func (s *Server) view(w *Watch) watchView {
 		v.Status, v.StatusTxt = "paused", "Sold out"
 	case w.Status == "blocked":
 		v.Status, v.StatusTxt = "blocked", "Blocked by site"
+	case w.Status == "noprice":
+		v.Status, v.StatusTxt = "error", "No price found"
+	case w.Status == "disallowed":
+		v.Status, v.StatusTxt = "blocked", "Disallowed by robots.txt"
 	case w.Status == "error":
-		v.Status, v.StatusTxt = "error", "Error"
+		v.Status, v.StatusTxt = "error", "Temporary error"
 	case w.Status == "ok":
 		v.Status, v.StatusTxt = "ok", "OK"
 	default:

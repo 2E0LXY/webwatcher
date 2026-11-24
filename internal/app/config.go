@@ -31,6 +31,7 @@ type Config struct {
 	WATplLogin    string
 	WATplAlert    string
 	WALang        string
+	RespectRobots bool   // WW_RESPECT_ROBOTS=1: opt-in robots.txt checks (default off)
 	SendBudget    int    // global outbound alert messages per hour
 	WAAppSecret   string // Meta webhook HMAC secret
 	WAVerifyToken string // Meta webhook GET verification token
@@ -70,6 +71,7 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		TwContentLogin: strings.TrimSpace(getenv("WW_TWILIO_CONTENT_LOGIN")),
 		TwContentAlert: strings.TrimSpace(getenv("WW_TWILIO_CONTENT_ALERT")),
 	}
+	c.RespectRobots = getenv("WW_RESPECT_ROBOTS") == "1"
 	c.SendBudget = 200
 	if v := strings.TrimSpace(getenv("WW_SEND_BUDGET_PER_HOUR")); v != "" {
 		n, err := strconv.Atoi(v)
