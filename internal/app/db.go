@@ -168,6 +168,17 @@ var migrations = []string{
 		target_id INTEGER,
 		target_label TEXT NOT NULL DEFAULT ''
 	);`,
+	`CREATE TABLE agent_tokens (
+		id INTEGER PRIMARY KEY,
+		user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		token_hash TEXT NOT NULL UNIQUE,
+		label TEXT NOT NULL DEFAULT '',
+		created_at INTEGER NOT NULL,
+		last_seen_at INTEGER,
+		revoked_at INTEGER
+	);
+	CREATE INDEX agent_tokens_user ON agent_tokens(user_id);
+	ALTER TABLE watches ADD COLUMN fetch_mode TEXT NOT NULL DEFAULT 'server';`,
 }
 
 // OpenDB opens (creating if needed) the SQLite database in dir and migrates it.

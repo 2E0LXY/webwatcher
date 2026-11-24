@@ -445,7 +445,7 @@ func (s *Store) WatchByID(id, uid int64) (*Watch, error) {
 
 func (s *Store) DueWatches(limit int) ([]*Watch, error) {
 	rows, err := s.db.Query(`SELECT `+s.watchCols()+` FROM watches w JOIN users u ON u.id=w.user_id
-		WHERE u.disabled_at IS NULL AND w.paused=0 AND w.failures<? AND w.next_check_at<=? ORDER BY w.next_check_at LIMIT ?`, MaxFailures, s.now(), limit)
+		WHERE u.disabled_at IS NULL AND w.fetch_mode='server' AND w.paused=0 AND w.failures<? AND w.next_check_at<=? ORDER BY w.next_check_at LIMIT ?`, MaxFailures, s.now(), limit)
 	if err != nil {
 		return nil, err
 	}
