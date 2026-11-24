@@ -2,7 +2,7 @@
 
 A small self-hosted price watcher. Paste the URL of a product, holiday or flight page, and webwatcher polls it. When the price changes it sends you a WhatsApp message, and if you set a target price you get a separate "below target" alert.
 
-One static Go binary (Go standard library plus `modernc.org/sqlite` and `golang.org/x/net/html`), SQLite storage, server-rendered HTML with plain CSS and no JavaScript. It listens on `127.0.0.1` and is meant to sit behind Caddy.
+One static Go binary (Go standard library plus `modernc.org/sqlite` and `golang.org/x/net/html`), SQLite storage, server-rendered HTML with plain CSS and no JavaScript framework (one optional 20-line script refreshes the unread badge). It listens on `127.0.0.1` and is meant to sit behind Caddy.
 
 ## Quick start (10 minutes)
 
@@ -18,7 +18,45 @@ sudo sh install.sh --domain watch.example.com
 
 If the repository is private, `export GITHUB_TOKEN=...` first, or build it yourself and add `--binary ./webwatcher`. It creates the `webwatcher` user and `/var/lib/webwatcher` (0700), writes `/etc/webwatcher.env` only if it does not exist (with a generated `WW_ADMIN_TOKEN` and your base URL), adds a validated Caddy site (after backing up the Caddyfile) and enables the service. It never asks for provider secrets. The service will not start until step 2 is done; that is deliberate.
 
-**2. Choose a WhatsApp path and edit `/etc/webwatcher.env`** (`sudo nano /etc/webwatcher.env`; uncomment one block).
+### Dashboard-only mode
+
+No WhatsApp provider is needed to start. Alerts appear inside the web dashboard (an unread badge in the header, a banner on the dashboard and a **Notifications** page) until you add a provider later.
+
+**2. Configure.** Edit `/etc/webwatcher.env` (`sudo nano /etc/webwatcher.env`):
+
+```sh
+WW_BASE_URL=https://watch.example.com
+WW_MESSENGER=dashboard
+```
+
+No provider variables are required. Then check and start:
+
+```sh
+sudo webwatcher doctor          # prints OK, plus a WARN that alerts are visible only inside the dashboard
+sudo systemctl restart webwatcher
+journalctl -u webwatcher -n 20
+```
+
+`doctor` prints variable names only, never secret values.
+
+**3. Log in.** The login page tells visitors to ask the administrator, and gives the same answer for every number. You create links yourself, as the service user (not root, or the database would be created unreadable by the service):
+
+```sh
+sudo -u webwatcher webwatcher adduser +447700900123      # new or existing user
+sudo -u webwatcher webwatcher loginlink +447700900123    # existing user only; same output
+```
+
+Each prints a one-time link (valid 15 minutes, single use, stored only as a hash) to your terminal. Send it to the person; they open it, press the confirm button and are in. Under the dashboard messenger the user is recorded with source `dashboard` and **no** WhatsApp consent: nothing is sent to their phone, and if you switch to WhatsApp later they receive nothing until they have ticked the WhatsApp opt-in. The commands talk to the database directly; there is no web equivalent.
+
+**4. Add a first watch and a target.** On the dashboard, under **Add a page to watch**, paste a single product or package page URL, optionally a label, enter a **target price** in pounds (you get a separate "below target" alert when the price falls to it or lower) and choose how often to check (1 hour is the default). Press **Start watching**; the first check happens shortly after and the row shows the last price and status. You can change the target later from the watch's page. When the price changes or reaches the target, a notification appears. The newest 200 per user are kept, and ones older than `WW_RETAIN_HISTORY_DAYS` (default 90) are removed.
+
+The unread badge refreshes itself every minute through `GET /notifications/count` (plain text) using a 20-line same-origin script, `/static/notify.js`; the content security policy is unchanged and there is no inline script. Without JavaScript the badge updates when you load a page.
+
+### Later: WhatsApp alerts
+
+Switch when you have a provider: set `WW_MESSENGER=twilio` or `meta` as below, run `webwatcher doctor`, restart. Existing notifications stay in the dashboard. Users created in dashboard mode have no WhatsApp consent, so each needs to log in through the WhatsApp login form and tick the opt-in (or you run `adduser` for them, which records `admin-created`).
+
+**Choose a WhatsApp path and edit `/etc/webwatcher.env`** (`sudo nano /etc/webwatcher.env`; uncomment one block).
 
 *Path A: Twilio WhatsApp sandbox (no template approval)*
 
@@ -50,7 +88,7 @@ WW_WA_VERIFY_TOKEN=any-long-random-string-you-choose
 - In the Meta app's WhatsApp configuration set the callback URL to `https://watch.example.com/hook/meta` with your verify token, and subscribe to `messages`.
 - Until the templates are approved you can still log in with `adduser` (step 4), but alerts to numbers outside a 24-hour chat window will not be delivered.
 
-**3. Check it.**
+**Check it.**
 
 ```sh
 sudo webwatcher doctor          # every line should be OK or WARN; it also prints the webhook URLs to paste
@@ -60,7 +98,7 @@ journalctl -u webwatcher -n 20
 
 `doctor` prints variable names only, never secret values.
 
-**4. Log in without WhatsApp.** Run this as the service user (not root, or the database would be created unreadable by the service):
+**Log in without WhatsApp.** Run this as the service user (not root, or the database would be created unreadable by the service):
 
 ```sh
 sudo -u webwatcher webwatcher adduser +447700900123
@@ -68,7 +106,6 @@ sudo -u webwatcher webwatcher adduser +447700900123
 
 It prints a one-time link (valid 15 minutes, single use, stored only as a hash) straight to your terminal; open it, press the confirm button, and you are in. The user is recorded with consent `admin-created`, so only add people who have agreed to receive messages from you. They can send STOP at any time. The command talks to the database directly; there is no web equivalent. Friends can use the normal login form (it sends the link over WhatsApp) once your provider is working for them, or you can run `adduser` for each of them and send them the link yourself.
 
-**5. Add a first watch and a target.** On the dashboard, under **Add a page to watch**, paste a single product or package page URL, optionally a label, enter a **target price** in pounds (you get a separate "below target" alert when the price falls to it or lower) and choose how often to check (1 hour is the default). Press **Start watching**; the first check happens shortly after and the row shows the last price and status. You can change the target later from the watch's page.
 
 **Honest note.** Webwatcher fetches pages like a plain HTTP client and does not evade bot protection. Many travel and retail sites (Jet2, TUI, easyJet and others) will answer with a block or a JavaScript-only page. When that happens the watch shows as **blocked** or **needs browser rendering**; it is reported, not bypassed, and there is nothing to configure that will change it. Try a different page for the same product, a CSS selector, or accept that the site cannot be watched.
 
@@ -141,7 +178,7 @@ WW_ADMIN_TOKEN=some-long-random-string
 
 Data lives in `WW_DIR` (mode 0700): `webwatcher.db` (SQLite, WAL mode, mode 0600) and `backups/` (mode 0700): a daily snapshot, AES-256-GCM encrypted when `WW_BACKUP_KEY` is set, mode 0600, deleted after 7 days. To restore an encrypted backup: `WW_BACKUP_KEY=... webwatcher -decrypt-backup backups/webwatcher-YYYYMMDD.db.enc -out restored.db`.
 
-Webwatcher refuses to start unless it is configured for production: `WW_BASE_URL` must be `https://` and `WW_MESSENGER` must be `meta` or `twilio`. Only with `WW_DEV=1` are an `http://` base URL and the `log` messenger allowed.
+Webwatcher refuses to start unless it is configured for production: `WW_BASE_URL` must be `https://` and `WW_MESSENGER` must be `dashboard`, `meta` or `twilio`. Only with `WW_DEV=1` are an `http://` base URL and the `log` messenger allowed.
 
 ### Environment variables
 
@@ -151,7 +188,7 @@ Webwatcher refuses to start unless it is configured for production: `WW_BASE_URL
 | `WW_DIR` | `./data` | Data directory (database and backups). |
 | `WW_BASE_URL` | `http://<WW_ADDR>` | Public URL, used in login links, alerts and Twilio signature checks. Must be `https://` unless `WW_DEV=1`; cookies get the `Secure` flag (and `__Host-` prefix) when it is HTTPS. |
 | `WW_ADMIN_TOKEN` | empty | Bearer token for `/healthz`. If empty, `/healthz` returns 404. |
-| `WW_MESSENGER` | `log` | `log`, `meta` or `twilio`. `log` is refused unless `WW_DEV=1` and the base URL is http. |
+| `WW_MESSENGER` | `log` | `dashboard`, `meta` or `twilio` (or `log`). `dashboard` needs no provider variables: alerts are stored as in-dashboard notifications. `log` is refused unless `WW_DEV=1` and the base URL is http. |
 | `WW_DEV` | unset | `1` allows an http base URL and the `log` messenger, and shows `/dev` with captured login links. Never use in production. |
 | `WW_SEND_BUDGET_PER_HOUR` | `200` | Global cap on outbound WhatsApp messages per rolling hour (alerts and login links). Over-budget alerts stay queued. |
 | `WW_RETAIN_HISTORY_DAYS` | `90` | Price history older than this is purged daily. |
