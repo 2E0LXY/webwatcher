@@ -25,11 +25,13 @@ type Config struct {
 	Dev        bool
 	Messenger  string
 
-	WAPhoneID  string
-	WAToken    string
-	WATplLogin string
-	WATplAlert string
-	WALang     string
+	WAPhoneID     string
+	WAToken       string
+	WATplLogin    string
+	WATplAlert    string
+	WALang        string
+	WAAppSecret   string // Meta webhook HMAC secret
+	WAVerifyToken string // Meta webhook GET verification token
 
 	TwSID          string
 	TwToken        string
@@ -58,6 +60,8 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		WATplLogin:     def("WW_WA_TPL_LOGIN", "webwatcher_login"),
 		WATplAlert:     def("WW_WA_TPL_ALERT", "webwatcher_alert"),
 		WALang:         def("WW_WA_LANG", "en_GB"),
+		WAAppSecret:    strings.TrimSpace(getenv("WW_WA_APP_SECRET")),
+		WAVerifyToken:  strings.TrimSpace(getenv("WW_WA_VERIFY_TOKEN")),
 		TwSID:          strings.TrimSpace(getenv("WW_TWILIO_SID")),
 		TwToken:        strings.TrimSpace(getenv("WW_TWILIO_TOKEN")),
 		TwFrom:         strings.TrimSpace(getenv("WW_TWILIO_FROM")),

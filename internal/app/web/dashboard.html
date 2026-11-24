@@ -2,6 +2,19 @@
 <h1>Your watches</h1>
 
 <section class="card">
+<h2>WhatsApp alerts</h2>
+{{if not .Consented}}
+<p>Alerts are <strong>off</strong>: we have no record that you agreed to receive WhatsApp messages. Log out, then log in again and tick the agreement box.</p>
+{{else if .AlertsOn}}
+<p>Alerts are <strong>on</strong>. Reply STOP to any message to switch them off.</p>
+<form method="post" action="/account/alerts" class="inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="enabled" value="0"><button type="submit">Turn alerts off</button></form>
+{{else}}
+<p>Alerts are <strong>off</strong>. Prices are still checked and shown here, but no WhatsApp messages are sent.</p>
+<form method="post" action="/account/alerts" class="inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="enabled" value="1"><button type="submit">Turn alerts on</button></form>
+{{end}}
+</section>
+
+<section class="card">
 <h2>Add a page to watch</h2>
 <form method="post" action="/watches" class="stack">
   <input type="hidden" name="csrf" value="{{.CSRF}}">

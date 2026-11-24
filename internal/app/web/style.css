@@ -42,3 +42,5 @@ details{margin:.25rem 0}
  td{display:block;border:0;padding:.2rem .6rem}
  td[data-label]::before{content:attr(data-label) ": ";color:var(--muted);font-size:.8rem}
 }
+input[type=checkbox]{width:auto;margin-right:.5rem}
+label.check{font-weight:400}

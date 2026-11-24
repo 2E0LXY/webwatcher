@@ -39,7 +39,7 @@ func TestTokenSingleUseExpiryAndHashAtRest(t *testing.T) {
 	s, clk := testStore(t)
 	msgr := &fakeMessenger{}
 	a := NewAuth(s, msgr, clk, "https://ww.example")
-	a.RequestLogin(context.Background(), "+447700900123", "1.2.3.4")
+	a.RequestLogin(context.Background(), "+447700900123", "1.2.3.4", true)
 	sent := msgr.Sent()
 	if len(sent) != 1 {
 		t.Fatalf("sent %d", len(sent))
@@ -84,7 +84,7 @@ func TestTokenSingleUseExpiryAndHashAtRest(t *testing.T) {
 	}
 
 	// token expiry
-	a.RequestLogin(context.Background(), "+447700900124", "1.2.3.4")
+	a.RequestLogin(context.Background(), "+447700900124", "1.2.3.4", true)
 	raw2 := strings.TrimPrefix(msgr.Sent()[1].Params[0], "https://ww.example/auth/")
 	clk.Advance(LoginTokenTTL + time.Second)
 	if _, _, err := a.Consume(raw2); !errors.Is(err, ErrInvalidToken) {
@@ -109,13 +109,13 @@ func TestLoginRateLimits(t *testing.T) {
 	msgr := &fakeMessenger{}
 	a := NewAuth(s, msgr, clk, "https://x")
 	for i := 0; i < 10; i++ {
-		a.RequestLogin(context.Background(), "+447700900123", "9.9.9.9")
+		a.RequestLogin(context.Background(), "+447700900123", "9.9.9.9", true)
 	}
 	if n := len(msgr.Sent()); n != 5 {
 		t.Fatalf("per-number limit: sent %d, want 5", n)
 	}
 	for i := 0; i < 30; i++ {
-		a.RequestLogin(context.Background(), "+4477009002"+string(rune('0'+i%10))+"0", "8.8.8.8")
+		a.RequestLogin(context.Background(), "+4477009002"+string(rune('0'+i%10))+"0", "8.8.8.8", true)
 	}
 	// per-IP limit is 20 per hour across numbers
 	if n := len(msgr.Sent()) - 5; n > 20 {
@@ -123,7 +123,7 @@ func TestLoginRateLimits(t *testing.T) {
 	}
 	clk.Advance(time.Hour + time.Second)
 	before := len(msgr.Sent())
-	a.RequestLogin(context.Background(), "+447700900123", "9.9.9.9")
+	a.RequestLogin(context.Background(), "+447700900123", "9.9.9.9", true)
 	if len(msgr.Sent()) != before+1 {
 		t.Fatal("limit should reset after window")
 	}
@@ -143,7 +143,7 @@ func TestDeleteUserErasesEverything(t *testing.T) {
 	_, h := newToken()
 	s.CreateSession(uid, h, "c", time.Hour)
 	_, h2 := newToken()
-	s.CreateLoginToken("+447700900123", h2, time.Hour)
+	s.CreateLoginToken("+447700900123", h2, time.Hour, true)
 
 	if err := s.DeleteUser(uid); err != nil {
 		t.Fatal(err)

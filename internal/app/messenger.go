@@ -37,7 +37,12 @@ type LogMessenger struct {
 func (l *LogMessenger) Name() string { return "log" }
 
 func (l *LogMessenger) Send(_ context.Context, m Message) error {
-	slog.Info("message (log messenger)", "kind", string(m.Kind), "to", m.To, "text", m.Text)
+	// Dev only. Login links are logged on purpose; alert text holds page URLs, so it is not.
+	if m.Kind == KindLogin {
+		slog.Info("message (log messenger)", "kind", string(m.Kind), "to", MaskPhone(m.To), "text", m.Text)
+	} else {
+		slog.Info("message (log messenger)", "kind", string(m.Kind), "to", MaskPhone(m.To))
+	}
 	l.mu.Lock()
 	l.recent = append(l.recent, m)
 	if len(l.recent) > 20 {

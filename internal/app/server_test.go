@@ -89,7 +89,7 @@ func (b *browser) csrf(path string) string {
 func (b *browser) login(phone string) string {
 	t := b.e.t
 	c := b.csrf("/login")
-	w := b.do("POST", "/login", url.Values{"csrf": {c}, "phone": {phone}})
+	w := b.do("POST", "/login", url.Values{"csrf": {c}, "phone": {phone}, "consent": {"1"}})
 	if w.Code != 200 {
 		t.Fatalf("login post: %d", w.Code)
 	}
@@ -134,7 +134,7 @@ func TestMagicLinkGETDoesNotConsume(t *testing.T) {
 	e := newTenv(t, nil)
 	b := e.browser()
 	c := b.csrf("/login")
-	b.do("POST", "/login", url.Values{"csrf": {c}, "phone": {"07700900123"}})
+	b.do("POST", "/login", url.Values{"csrf": {c}, "phone": {"07700900123"}, "consent": {"1"}})
 	e.srv.Wait()
 	path := strings.TrimPrefix(e.msgr.Sent()[0].Params[0], e.cfg.BaseURL)
 	for i := 0; i < 3; i++ { // link-preview bots
@@ -171,7 +171,7 @@ func TestSessionCookieAttributes(t *testing.T) {
 	e := newTenv(t, func(c *Config) { c.BaseURL = "https://ww.example" })
 	b := e.browser()
 	c := b.csrf("/login")
-	b.do("POST", "/login", url.Values{"csrf": {c}, "phone": {"07700900123"}})
+	b.do("POST", "/login", url.Values{"csrf": {c}, "phone": {"07700900123"}, "consent": {"1"}})
 	e.srv.Wait()
 	path := strings.TrimPrefix(e.msgr.Sent()[0].Params[0], "https://ww.example")
 	c = b.csrf(path)
@@ -207,7 +207,7 @@ func TestNoEnumerationResponsesIdentical(t *testing.T) {
 		b := e.browser()
 		b.ip = ip
 		c := b.csrf("/login")
-		w := b.do("POST", "/login", url.Values{"csrf": {c}, "phone": {phone}})
+		w := b.do("POST", "/login", url.Values{"csrf": {c}, "phone": {phone}, "consent": {"1"}})
 		return w.Code, w.Body.String()
 	}
 	cKnown, bKnown := post("07700900111", "198.51.100.1")
@@ -510,7 +510,7 @@ func TestDevPageGated(t *testing.T) {
 	lm := &LogMessenger{}
 	a := NewAuth(st, lm, clk, cfg.BaseURL)
 	srv, _ := NewServer(cfg, st, a, lm, clk)
-	a.RequestLogin(context.Background(), "+447700900123", "1.1.1.1")
+	a.RequestLogin(context.Background(), "+447700900123", "1.1.1.1", true)
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, httptest.NewRequest("GET", "/dev", nil))
 	if w.Code != 200 || !strings.Contains(w.Body.String(), "/auth/") {

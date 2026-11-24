@@ -57,3 +57,17 @@ func NormalisePhone(in string) (string, error) {
 	}
 	return "+" + digits, nil
 }
+
+// MaskPhone hides all but the last three digits, for logs.
+func MaskPhone(p string) string {
+	d := strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' {
+			return r
+		}
+		return -1
+	}, p)
+	if len(d) <= 3 {
+		return "***"
+	}
+	return "***" + d[len(d)-3:]
+}

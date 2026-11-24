@@ -7,6 +7,7 @@ import (
 	"embed"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"log/slog"
@@ -81,6 +82,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /watches/{id}/delete", s.withSession(s.handleDeleteWatch))
 	mux.HandleFunc("GET /account", s.withSession(s.handleAccount))
 	mux.HandleFunc("POST /account/delete", s.withSession(s.handleDeleteAccount))
+	mux.HandleFunc("POST /account/alerts", s.withSession(s.handleToggleAlerts))
+	mux.HandleFunc("GET /hook/meta", s.handleMetaVerify)
+	mux.HandleFunc("POST /hook/meta", s.handleMetaPost)
+	mux.HandleFunc("POST /hook/twilio", s.handleTwilioPost)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /dev", s.handleDev)
 	mux.Handle("GET /static/", http.StripPrefix("/static/", s.staticHandler()))
@@ -303,6 +308,8 @@ type pageData struct {
 	Heading   string
 	Body      string
 	Token     string
+	AlertsOn  bool
+	Consented bool
 }
 
 type devMsg struct{ Kind, To, Text, Link string }
@@ -331,7 +338,7 @@ func (s *Server) message(w http.ResponseWriter, r *http.Request, status int, hea
 
 var flashes = map[string]string{
 	"added": "Watch added. The first check happens within a minute or so.", "deleted": "Watch deleted.",
-	"saved": "Changes saved.", "paused": "Watch paused.", "resumed": "Watch resumed.",
+	"saved": "Changes saved.", "alerts_on": "WhatsApp alerts are on.", "alerts_off": "WhatsApp alerts are off. You will get no more alert messages.", "paused": "Watch paused.", "resumed": "Watch resumed.",
 }
 
 func intervalLabel(m int) string {
@@ -419,6 +426,10 @@ func (s *Server) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 		s.message(w, r, http.StatusForbidden, "Forbidden", "Your form had expired. Go back, reload the page and try again.")
 		return
 	}
+	if r.PostFormValue("consent") != "1" {
+		s.render(w, http.StatusBadRequest, "login", pageData{Title: "Log in", CSRF: s.preCSRF(w, r), Error: "Please tick the box to agree to receive WhatsApp messages from Webwatcher. We cannot send you a login link without it."})
+		return
+	}
 	phone, err := NormalisePhone(r.PostFormValue("phone"))
 	if err != nil {
 		s.render(w, http.StatusBadRequest, "login", pageData{Title: "Log in", CSRF: s.preCSRF(w, r), Error: "That does not look like a valid WhatsApp number. UK numbers can start with 07 or +44."})
@@ -433,7 +444,7 @@ func (s *Server) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 		defer s.bg.Done()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		s.auth.RequestLogin(ctx, phone, ip)
+		s.auth.RequestLogin(ctx, phone, ip, true)
 	}()
 	s.render(w, http.StatusOK, "sent", pageData{Title: "Check WhatsApp"})
 }
@@ -479,7 +490,8 @@ func (s *Server) renderDashboard(w http.ResponseWriter, r *http.Request, sess *S
 		return
 	}
 	d := pageData{Title: "Dashboard", Phone: sess.Phone, CSRF: sess.CSRF, LoggedIn: true, Form: f, Error: errMsg,
-		Flash: flashes[r.URL.Query().Get("m")], Intervals: intervalOpts(f.Interval), Count: len(ws), Cap: MaxWatchesPerUser}
+		Flash: flashes[r.URL.Query().Get("m")], Intervals: intervalOpts(f.Interval), Count: len(ws), Cap: MaxWatchesPerUser,
+		AlertsOn: sess.AlertsEnabled, Consented: sess.ConsentAt != nil}
 	for _, x := range ws {
 		d.Watches = append(d.Watches, s.view(x))
 	}
@@ -679,6 +691,23 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request, ses
 	}
 	s.setCookie(w, s.sessionCookieName(), "", -1)
 	s.message(w, r, http.StatusOK, "Account deleted", "Your number, watches, price history and sessions have been erased.")
+}
+
+func (s *Server) handleToggleAlerts(w http.ResponseWriter, r *http.Request, sess *Session) {
+	on := r.PostFormValue("enabled") == "1"
+	if err := s.store.SetAlertsEnabled(sess.UserID, on); err != nil {
+		if errors.Is(err, ErrNoConsent) {
+			s.message(w, r, http.StatusBadRequest, "Consent needed", "We have no record that you agreed to receive WhatsApp messages. Log out, then log in again and tick the agreement box.")
+			return
+		}
+		s.message(w, r, 500, "Error", "Could not save.")
+		return
+	}
+	m := "alerts_off"
+	if on {
+		m = "alerts_on"
+	}
+	http.Redirect(w, r, "/?m="+m, http.StatusSeeOther)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

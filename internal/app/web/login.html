@@ -5,6 +5,8 @@
   <input type="hidden" name="csrf" value="{{.CSRF}}">
   <label for="phone">WhatsApp number</label>
   <input id="phone" name="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="07700 900123 or +44 7700 900123" required maxlength="40">
+  <label class="check"><input type="checkbox" name="consent" value="1" required> I agree to receive WhatsApp messages from Webwatcher about my watches</label>
+  <p class="hint">You can stop them at any time: reply STOP to a message, or switch alerts off on your dashboard.</p>
   <button type="submit">Send login link</button>
 </form>
 {{end}}

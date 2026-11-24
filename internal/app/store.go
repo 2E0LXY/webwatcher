@@ -10,6 +10,7 @@ var (
 	ErrInvalidToken = errors.New("invalid or expired token")
 	ErrWatchCap     = errors.New("watch limit reached")
 	ErrNotFound     = errors.New("not found")
+	ErrNoConsent    = errors.New("no recorded consent")
 )
 
 const (
@@ -29,16 +30,25 @@ func NewStore(db *sql.DB, clock Clock) *Store { return &Store{db: db, clock: clo
 func (s *Store) now() int64 { return s.clock.Now().Unix() }
 
 type Session struct {
-	UserID int64
-	Phone  string
-	CSRF   string
+	UserID        int64
+	Phone         string
+	CSRF          string
+	AlertsEnabled bool
+	ConsentAt     *int64
 }
 
 // CreateLoginToken stores only the hash of a single-use login token.
-func (s *Store) CreateLoginToken(phone, hash string, ttl time.Duration) error {
+// When consent is true the explicit WhatsApp opt-in tick is recorded with the
+// current time and copied to the user when the token is consumed.
+func (s *Store) CreateLoginToken(phone, hash string, ttl time.Duration, consent bool) error {
 	now := s.clock.Now()
-	_, err := s.db.Exec(`INSERT INTO login_tokens(phone, token_hash, created_at, expires_at) VALUES(?,?,?,?)`,
-		phone, hash, now.Unix(), now.Add(ttl).Unix())
+	var c *int64
+	if consent {
+		n := now.Unix()
+		c = &n
+	}
+	_, err := s.db.Exec(`INSERT INTO login_tokens(phone, token_hash, created_at, expires_at, consent_at) VALUES(?,?,?,?,?)`,
+		phone, hash, now.Unix(), now.Add(ttl).Unix(), c)
 	return err
 }
 
@@ -52,8 +62,9 @@ func (s *Store) ConsumeLoginToken(hash string) (int64, string, error) {
 	defer tx.Rollback()
 	now := s.now()
 	var phone string
-	err = tx.QueryRow(`UPDATE login_tokens SET used_at=? WHERE token_hash=? AND used_at IS NULL AND expires_at>? RETURNING phone`,
-		now, hash, now).Scan(&phone)
+	var consent *int64
+	err = tx.QueryRow(`UPDATE login_tokens SET used_at=? WHERE token_hash=? AND used_at IS NULL AND expires_at>? RETURNING phone, consent_at`,
+		now, hash, now).Scan(&phone, &consent)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, "", ErrInvalidToken
 	}
@@ -61,9 +72,10 @@ func (s *Store) ConsumeLoginToken(hash string) (int64, string, error) {
 		return 0, "", err
 	}
 	var uid int64
-	err = tx.QueryRow(`INSERT INTO users(phone, created_at, last_login_at) VALUES(?,?,?)
-		ON CONFLICT(phone) DO UPDATE SET last_login_at=excluded.last_login_at RETURNING id`,
-		phone, now, now).Scan(&uid)
+	err = tx.QueryRow(`INSERT INTO users(phone, created_at, last_login_at, consent_at) VALUES(?,?,?,?)
+		ON CONFLICT(phone) DO UPDATE SET last_login_at=excluded.last_login_at,
+			consent_at=COALESCE(users.consent_at, excluded.consent_at) RETURNING id`,
+		phone, now, now, consent).Scan(&uid)
 	if err != nil {
 		return 0, "", err
 	}
@@ -79,8 +91,10 @@ func (s *Store) CreateSession(uid int64, hash, csrf string, ttl time.Duration) e
 
 func (s *Store) SessionByHash(hash string) (*Session, error) {
 	var x Session
-	err := s.db.QueryRow(`SELECT s.user_id, u.phone, s.csrf FROM sessions s JOIN users u ON u.id=s.user_id
-		WHERE s.token_hash=? AND s.expires_at>?`, hash, s.now()).Scan(&x.UserID, &x.Phone, &x.CSRF)
+	var ae int
+	err := s.db.QueryRow(`SELECT s.user_id, u.phone, s.csrf, u.alerts_enabled, u.consent_at FROM sessions s JOIN users u ON u.id=s.user_id
+		WHERE s.token_hash=? AND s.expires_at>?`, hash, s.now()).Scan(&x.UserID, &x.Phone, &x.CSRF, &ae, &x.ConsentAt)
+	x.AlertsEnabled = ae != 0
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -112,10 +126,84 @@ func (s *Store) DeleteUser(uid int64) error {
 	return tx.Commit()
 }
 
+// SetAlertsEnabled turns WhatsApp alerts on or off for a user. Turning them
+// on needs a recorded consent; it returns ErrNoConsent otherwise.
+func (s *Store) SetAlertsEnabled(uid int64, on bool) error {
+	return s.setAlerts(`id=?`, uid, on)
+}
+
+// SetAlertsByPhone is used by the inbound STOP/START webhooks. It reports
+// whether a user with that number exists.
+func (s *Store) SetAlertsByPhone(phone string, on bool) (bool, error) {
+	err := s.setAlerts(`phone=?`, phone, on)
+	if errors.Is(err, ErrNotFound) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+func (s *Store) setAlerts(where string, arg any, on bool) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := setAlertsTx(tx, where, arg, on); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func setAlertsTx(tx *sql.Tx, where string, arg any, on bool) error {
+	var uid int64
+	var consent *int64
+	err := tx.QueryRow(`SELECT id, consent_at FROM users WHERE `+where, arg).Scan(&uid, &consent)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if on && consent == nil {
+		return ErrNoConsent
+	}
+	v := 0
+	if on {
+		v = 1
+	}
+	_, err = tx.Exec(`UPDATE users SET alerts_enabled=? WHERE id=?`, v, uid)
+	return err
+}
+
+// ApplyInbound records an inbound webhook message id (replay protection) and,
+// if it is new, applies the STOP/START command to the user with that number.
+// It returns replay=true if the id had been seen before.
+func (s *Store) ApplyInbound(provider, msgID, phone string, on bool) (replay bool, err error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`INSERT OR IGNORE INTO webhook_seen(provider,msg_id,seen_at) VALUES(?,?,?)`, provider, msgID, s.now())
+	if err != nil {
+		return false, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return true, nil
+	}
+	if err := setAlertsTx(tx, `phone=?`, phone, on); err != nil && !errors.Is(err, ErrNotFound) && !errors.Is(err, ErrNoConsent) {
+		return false, err
+	}
+	return false, tx.Commit()
+}
+
 // Cleanup removes expired sessions and old login tokens.
 func (s *Store) Cleanup() error {
 	now := s.now()
 	if _, err := s.db.Exec(`DELETE FROM sessions WHERE expires_at<?`, now); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`DELETE FROM webhook_seen WHERE seen_at<?`, now-7*86400); err != nil {
 		return err
 	}
 	_, err := s.db.Exec(`DELETE FROM login_tokens WHERE expires_at<?`, now-86400)
@@ -145,21 +233,22 @@ type Watch struct {
 	FailureNotif   bool
 	CreatedAt      int64
 	Phone          string // joined from users; set by DueWatches/WatchByID
+	AlertsOn       bool   // user has consented and not opted out
 }
 
 const watchCols = `w.id,w.user_id,w.url,w.label,w.selector,w.target_pence,w.interval_min,w.paused,w.status,
 	w.last_price_pence,w.alert_base_pence,w.currency,w.last_method,w.last_error,w.last_checked_at,
-	w.next_check_at,w.failures,w.failure_notified,w.created_at,u.phone`
+	w.next_check_at,w.failures,w.failure_notified,w.created_at,u.phone,(u.alerts_enabled=1 AND u.consent_at IS NOT NULL)`
 
 type rowScanner interface{ Scan(...any) error }
 
 func scanWatch(r rowScanner) (*Watch, error) {
 	var w Watch
-	var paused, fn int
+	var paused, fn, ao int
 	err := r.Scan(&w.ID, &w.UserID, &w.URL, &w.Label, &w.Selector, &w.TargetPence, &w.IntervalMin, &paused, &w.Status,
 		&w.LastPricePence, &w.AlertBase, &w.Currency, &w.LastMethod, &w.LastError, &w.LastCheckedAt,
-		&w.NextCheckAt, &w.Failures, &fn, &w.CreatedAt, &w.Phone)
-	w.Paused, w.FailureNotif = paused != 0, fn != 0
+		&w.NextCheckAt, &w.Failures, &fn, &w.CreatedAt, &w.Phone, &ao)
+	w.Paused, w.FailureNotif, w.AlertsOn = paused != 0, fn != 0, ao != 0
 	return &w, err
 }
 

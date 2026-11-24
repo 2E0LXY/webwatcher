@@ -4,7 +4,9 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -60,7 +62,7 @@ func testStore(t *testing.T) (*Store, *fakeClock) {
 func mustUser(t *testing.T, s *Store, phone string) int64 {
 	t.Helper()
 	raw, h := newToken()
-	if err := s.CreateLoginToken(phone, h, time.Minute); err != nil {
+	if err := s.CreateLoginToken(phone, h, time.Minute, true); err != nil {
 		t.Fatal(err)
 	}
 	_ = raw
@@ -74,4 +76,15 @@ func mustUser(t *testing.T, s *Store, phone string) int64 {
 func TestMain(m *testing.M) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	os.Exit(m.Run())
+}
+
+func reqWithHeader(e *tenv, method, path, body string, h map[string]string) int {
+	r := httptest.NewRequest(method, path, strings.NewReader(body))
+	r.RemoteAddr = "203.0.113.9:4000"
+	for k, v := range h {
+		r.Header.Set(k, v)
+	}
+	w := httptest.NewRecorder()
+	e.h.ServeHTTP(w, r)
+	return w.Code
 }

@@ -76,6 +76,15 @@ var migrations = []string{
 		sent_at INTEGER NOT NULL
 	);
 	CREATE INDEX alerts_sent_watch ON alerts_sent(watch_id, kind, id);`,
+	`ALTER TABLE users ADD COLUMN alerts_enabled INTEGER NOT NULL DEFAULT 1;
+	ALTER TABLE users ADD COLUMN consent_at INTEGER;
+	ALTER TABLE login_tokens ADD COLUMN consent_at INTEGER;
+	CREATE TABLE webhook_seen (
+		provider TEXT NOT NULL,
+		msg_id TEXT NOT NULL,
+		seen_at INTEGER NOT NULL,
+		PRIMARY KEY (provider, msg_id)
+	);`,
 }
 
 // OpenDB opens (creating if needed) the SQLite database in dir and migrates it.

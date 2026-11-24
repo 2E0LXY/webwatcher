@@ -93,14 +93,14 @@ func NewAuth(store *Store, msgr Messenger, clock Clock, baseURL string) *Auth {
 
 // RequestLogin creates and sends a magic link. It never reveals whether the
 // number is known or the request was rate limited; callers show one response.
-func (a *Auth) RequestLogin(ctx context.Context, phone, ip string) {
+func (a *Auth) RequestLogin(ctx context.Context, phone, ip string, consent bool) {
 	now := a.clock.Now()
 	if !a.byIP.Allow(ip, now) || !a.byPhone.Allow(phone, now) {
 		slog.Warn("login rate limited")
 		return
 	}
 	raw, hash := newToken()
-	if err := a.store.CreateLoginToken(phone, hash, LoginTokenTTL); err != nil {
+	if err := a.store.CreateLoginToken(phone, hash, LoginTokenTTL, consent); err != nil {
 		slog.Error("create login token", "err", err)
 		return
 	}
