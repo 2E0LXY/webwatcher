@@ -129,7 +129,7 @@ Upgrading later: re-run `sudo sh install.sh --domain watch.example.com`. It is i
 - **Plain HTTP only.** Webwatcher fetches the page the way a simple HTTP client does. It does not run JavaScript. Many travel sites, including **Jet2, Jet2holidays, TUI and easyJet**, build prices in the browser and/or sit behind bot protection (Akamai, Cloudflare and similar). Expect some of those pages to fail.
 - **Bot protection is respected, not evaded.** If a site answers 403/429 or serves a bot-challenge page, the watch is marked `blocked` and the dashboard tells you so. Webwatcher uses an honest `webwatcher/<version>` User-Agent and will never spoof browsers, rotate proxies or use stealth tricks. A blocked page is reported, not bypassed, and cannot be watched.
 - **robots.txt is not consulted by default.** You, as the operator, are responsible for complying with each site's terms of use and for deciding which pages are appropriate to poll at a personal, low rate. Check each site's current terms before watching it. If you want Webwatcher to check robots.txt, set `WW_RESPECT_ROBOTS=1`: it then fetches `/robots.txt` once per host (cached 24 hours), does not fetch pages that `Disallow` matches for the `webwatcher` user agent, and shows the watch as **Disallowed by robots.txt**. An unreachable robots.txt counts as allowed.
-- **Pages that need JavaScript** show "needs browser rendering". Check with "View source" in your browser: if the price is not in the source text, plain fetching cannot see it. A headless-browser fetcher is planned as a later addition; the fetcher is an interface so it can be added without touching the rest.
+- **Pages that need JavaScript** cannot be read by the server. Check with "View source" in your browser: if the price is not in the source text, plain fetching cannot see it. Use the [Home agent](#home-agent), which reads the page in your own browser.
 - A listing page with many prices is ambiguous. Use a single product or package page, or give a CSS selector.
 - If you set a selector and it stops matching (the site changed), the watch fails with "selector matched nothing". It never silently falls back to another method, so a redesign cannot cause a bogus price alert.
 - Politeness: at most 4 fetches at once, at least 60 seconds between requests to the same host, 2 MB body cap, 20 second timeout, 5 redirects.
@@ -141,6 +141,41 @@ Upgrading later: re-run `sudo sh install.sh --domain watch.example.com`. It is i
 3. Enter a selector such as `.price-box__amount`, `#total-price`, `div.summary > span.price` or `[data-price]`.
 
 Supported syntax: tag, `*`, `.class`, `#id`, `[attr]`, `[attr=value]`, `[attr^=value]`, `[attr$=value]`, `[attr*=value]`, `[attr~=value]`, compounds such as `span.price[data-x]`, descendant (space) and child (`>`) combinators. No commas, pseudo-classes or sibling combinators. The text (or a `content`/`data-price` attribute) of the first match is searched for an amount.
+
+## Home agent
+
+Some sites (Jet2, Jet2holidays, TUI, easyJet) block data-centre addresses and draw their prices with JavaScript, so the server cannot read them. The **Home agent** is a small program (`webwatcher-agent`) that runs on your own always-on PC. It opens the pages you choose in your installed Chrome or Edge from your home connection, reads the rendered page and reports it to the server. The server then does exactly what it does for its own fetches: extracts the price, records history, and raises alerts and dashboard notifications.
+
+How it works:
+
+- On the dashboard, **Home agent** creates a token (up to 3 per account; shown once, stored only as a SHA-256 hash; revoke or replace it at any time). Admins can also run `webwatcher agenttoken +447700900123` (add `--show-status` or `--revoke`).
+- Each watch has **Fetch from**: *This server* (default, unchanged for existing watches) or *My home agent*. The add form suggests the home agent for jet2.com, jet2holidays.com, tui.co.uk and easyjet.com but never forces it. A watch set to the home agent is never fetched by the server. If the agent reports nothing for three check intervals the watch shows **Agent offline**.
+- The agent polls `GET /api/agent/jobs` every 60 seconds (bearer token) for the due watches of its own account only, loads them one at a time, and posts each result to `POST /api/agent/result`. Bodies are capped at 4 MB, the rendered page at 2 MB, and requests are rate limited per token and per address. A bad token gets a plain 404. The server checks that the final URL is on the watched site.
+
+### Set it up on Windows
+
+1. On the dashboard, open **Home agent**, press **Create agent token**, and copy the token (it is shown once).
+2. Download `webwatcher-agent-windows-amd64.exe` from the release assets (check it against `SHA256SUMS`), and put it somewhere permanent, for example `C:\Tools\webwatcher-agent.exe`.
+3. Open PowerShell and run it once, giving the server address and token:
+   ```
+   C:\Tools\webwatcher-agent.exe -server https://watch.example.com -token wwa_...
+   ```
+   It checks the token, saves it to `%APPDATA%\webwatcher-agent\token` (readable by your account only) and the address to `config.json`, then starts working. A minimised Chrome or Edge window opens. Press Ctrl+C to stop it. You never need `-token` again.
+4. Run `C:\Tools\webwatcher-agent.exe install`. This registers a per-user Scheduled Task that starts the agent at your logon and restarts it if it fails, and starts it now. `uninstall` removes it.
+5. Run `C:\Tools\webwatcher-agent.exe status` to see whether the server is reachable, the token is valid, a browser was found, the task is installed and what the last result was. It never prints the token.
+6. Change the watch(es) to **My home agent** on the dashboard.
+
+Flags and environment (all optional once saved): `-server` / `WW_AGENT_SERVER`, `-token` / `WW_AGENT_TOKEN`, `-browser` (path to chrome.exe or msedge.exe; default auto-detects Chrome then Edge in Program Files, Program Files (x86) and LocalAppData), `-profile` (default `%LOCALAPPDATA%\webwatcher-agent\profile`, a dedicated profile that is not your own), `-headless` (headless=new instead of a minimised window; some sites treat it differently). The log is `%LOCALAPPDATA%\webwatcher-agent\agent.log` (rotated at 2 MB; no tokens, no query strings). The same program builds for Linux and macOS (`install` is Windows only).
+
+How politely it behaves: one page at a time; at least 5 minutes between loads of the same host; a random 5 to 60 second pause before each load; each watch no more often than its own interval; a 45 second page limit plus up to 10 seconds for the network to go quiet; one browser instance; every tab closed after use; no screenshots. Only `http` and `https` URLs are loaded.
+
+### Honest limits
+
+- **It may still be challenged.** Your home address and a real browser are less suspicious than a server, but the sites' bot protection can still stop it, especially a headless or freshly started browser.
+- **If it is challenged, it stops and says so.** The watch shows **Blocked by site**, and the agent leaves that site alone for 6 hours before trying again. It never solves CAPTCHAs, never disguises the browser (no stealth flags, no user-agent changes, automation indicators left on) and never retries straight away. There is no evasion and none is planned.
+- **You are responsible for each site's terms** of use and for choosing pages and a rate that suit them. The defaults are deliberately slow.
+- **Keep the PC awake.** In Windows Settings, System, Power, set sleep to Never while plugged in, or the agent cannot run and watches show **Agent offline**. The browser window stays minimised on your desktop.
+- The agent trusts the server it is pointed at, and the server trusts the agent's token: anyone holding a token can read that account's agent watch URLs and report prices for them. Keep it private and revoke it if it leaks.
 
 ## Installation
 
@@ -305,7 +340,7 @@ Both webhooks handle the keywords STOP, STOPALL, UNSUBSCRIBE, CANCEL, END and QU
 - Magic-link tokens and session tokens are random, stored only as SHA-256 hashes, compared in constant time, and never logged (`/auth/` paths are masked in logs). Opening a link shows a button; only pressing it logs you in, so link-preview bots cannot use up the token.
 - Login requests are rate limited per number and per IP, and the response is identical whether or not a number is known.
 - All forms carry CSRF tokens. All SQL is parameterised. Pages are `html/template` auto-escaped, with `Content-Security-Policy: default-src 'self'`, `X-Frame-Options: DENY`, no inline scripts, 64 KB form limit and request timeouts.
-- User-supplied URLs are fetched only by the scheduler. URLs with credentials, ports other than 80/443, or IP-literal hosts are rejected. The fetcher refuses loopback, private, link-local, CGNAT, multicast and cloud-metadata addresses, re-checks on every redirect, and checks again at connect time, so DNS rebinding cannot get through. Proxy environment variables are ignored.
+- User-supplied URLs are fetched only by the scheduler, and never for watches set to the home agent (the server makes no request for those; the agent API accepts only an account's own watches). URLs with credentials, ports other than 80/443, or IP-literal hosts are rejected. The fetcher refuses loopback, private, link-local, CGNAT, multicast and cloud-metadata addresses, re-checks on every redirect, and checks again at connect time, so DNS rebinding cannot get through. Proxy environment variables are ignored.
 - `/healthz` needs `WW_ADMIN_TOKEN`.
 
 ## Privacy
@@ -340,4 +375,4 @@ Tests make no network calls to real sites or WhatsApp; they use `httptest` serve
 
 ## Releases
 
-CI only. Bump `VERSION` on `main`; the `release` workflow tests, builds static `linux/amd64` and `linux/arm64` binaries with checksums, and creates the GitHub release (the tag is created server-side). Tags are never pushed by hand.
+CI only. Bump `VERSION` on `main`; the `release` workflow tests, builds static `linux/amd64` and `linux/arm64` server binaries and the `webwatcher-agent` binaries (`windows/amd64`, `linux/amd64`, `darwin/arm64`) with checksums, and creates the GitHub release (the tag is created server-side). Tags are never pushed by hand.
