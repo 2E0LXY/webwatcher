@@ -15,6 +15,7 @@ var (
 const (
 	MaxWatchesPerUser = 30
 	HistoryCap        = 500
+	MaxFailures       = 10
 )
 
 // Store wraps the database. All SQL is parameterised.
@@ -226,7 +227,7 @@ func (s *Store) WatchByID(id, uid int64) (*Watch, error) {
 
 func (s *Store) DueWatches(limit int) ([]*Watch, error) {
 	rows, err := s.db.Query(`SELECT `+watchCols+` FROM watches w JOIN users u ON u.id=w.user_id
-		WHERE w.paused=0 AND w.status<>'stopped' AND w.next_check_at<=? ORDER BY w.next_check_at LIMIT ?`, s.now(), limit)
+		WHERE w.paused=0 AND w.failures<? AND w.next_check_at<=? ORDER BY w.next_check_at LIMIT ?`, MaxFailures, s.now(), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -269,7 +270,7 @@ func (s *Store) SetPaused(uid, id int64, paused bool) error {
 		return s.exec1(uid, id, `UPDATE watches SET paused=1`)
 	}
 	return s.exec1(uid, id, `UPDATE watches SET paused=0, failures=0, failure_notified=0,
-		status=CASE WHEN status IN ('stopped','blocked','error') THEN 'pending' ELSE status END, next_check_at=?`, s.now())
+		status=CASE WHEN status IN ('blocked','error') THEN 'pending' ELSE status END, next_check_at=?`, s.now())
 }
 
 func (s *Store) DeleteWatch(uid, id int64) error {
