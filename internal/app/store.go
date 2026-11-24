@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -24,8 +25,23 @@ const (
 
 // Store wraps the database. All SQL is parameterised.
 type Store struct {
-	db    *sql.DB
-	clock Clock
+	db        *sql.DB
+	clock     Clock
+	dashboard bool // WW_MESSENGER=dashboard: alerts need no WhatsApp consent
+}
+
+// UseDashboardAlerts selects the dashboard messenger's rules: alerts are
+// in-app notifications, so they need no WhatsApp consent. Call it before the
+// store is shared between goroutines.
+func (s *Store) UseDashboardAlerts(on bool) { s.dashboard = on }
+
+// allowedSQL is the SQL condition (over users u) under which a user may be
+// sent alerts. WhatsApp needs a recorded opt-in; the dashboard does not.
+func (s *Store) allowedSQL() string {
+	if s.dashboard {
+		return `(u.alerts_enabled=1)`
+	}
+	return `(u.alerts_enabled=1 AND u.consent_at IS NOT NULL)`
 }
 
 func NewStore(db *sql.DB, clock Clock) *Store { return &Store{db: db, clock: clock} }
@@ -134,7 +150,7 @@ func (s *Store) DeleteSession(hash string) error {
 }
 
 // DeleteUser erases the user and everything hanging off them (sessions,
-// watches, history, alerts) plus any outstanding login tokens for the number.
+// watches, history, alerts, notifications) plus any outstanding login tokens for the number.
 func (s *Store) DeleteUser(uid int64) error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -144,7 +160,7 @@ func (s *Store) DeleteUser(uid int64) error {
 	if _, err := tx.Exec(`DELETE FROM login_tokens WHERE phone=(SELECT phone FROM users WHERE id=?)`, uid); err != nil {
 		return err
 	}
-	for _, q := range []string{`DELETE FROM outbox WHERE user_id=?`, `DELETE FROM sessions WHERE user_id=?`} {
+	for _, q := range []string{`DELETE FROM outbox WHERE user_id=?`, `DELETE FROM notifications WHERE user_id=?`, `DELETE FROM sessions WHERE user_id=?`} {
 		if _, err := tx.Exec(q, uid); err != nil {
 			return err
 		}
@@ -246,6 +262,7 @@ func (s *Store) Cleanup() error {
 
 // Purge applies the retention rules: price history older than historyDays, and
 // check logs, finished outbox rows and old send records older than diagDays.
+// Notifications follow the history retention.
 // The newest alert record per watch and kind is kept, as it drives de-duplication.
 func (s *Store) Purge(historyDays, diagDays int) error {
 	now := s.now()
@@ -259,6 +276,7 @@ func (s *Store) Purge(historyDays, diagDays int) error {
 		{`DELETE FROM check_log WHERE checked_at<?`, d},
 		{`DELETE FROM outbox WHERE status<>'queued' AND COALESCE(done_at, created_at)<?`, d},
 		{`DELETE FROM send_log WHERE at<?`, now - 7200},
+		{`DELETE FROM notifications WHERE created_at<?`, h},
 	} {
 		if _, err := s.db.Exec(q.sql, q.arg); err != nil {
 			return err
@@ -308,10 +326,14 @@ type Watch struct {
 	Version        int64 // bumped on target, pause and basis edits; guards queued alerts against stale snapshots
 }
 
-const watchCols = `w.id,w.user_id,w.url,w.label,w.selector,w.target_pence,w.interval_min,w.paused,w.status,
+const watchColsTpl = `w.id,w.user_id,w.url,w.label,w.selector,w.target_pence,w.interval_min,w.paused,w.status,
 	w.last_price_pence,w.alert_base_pence,w.currency,w.last_method,w.last_error,w.last_checked_at,
-	w.next_check_at,w.failures,w.failure_notified,w.created_at,u.phone,(u.alerts_enabled=1 AND u.consent_at IS NOT NULL),
+	w.next_check_at,w.failures,w.failure_notified,w.created_at,u.phone,{ALLOWED},
 	w.basis,w.basis_changed,w.obs_price_pence,w.obs_currency,w.obs_basis,w.sold_out,w.etag,w.last_modified,w.version`
+
+func (s *Store) watchCols() string {
+	return strings.Replace(watchColsTpl, "{ALLOWED}", s.allowedSQL(), 1)
+}
 
 type rowScanner interface{ Scan(...any) error }
 
@@ -357,7 +379,7 @@ func (s *Store) AddWatch(w Watch) (int64, error) {
 }
 
 func (s *Store) ListWatches(uid int64) ([]*Watch, error) {
-	rows, err := s.db.Query(`SELECT `+watchCols+` FROM watches w JOIN users u ON u.id=w.user_id WHERE w.user_id=? ORDER BY w.id`, uid)
+	rows, err := s.db.Query(`SELECT `+s.watchCols()+` FROM watches w JOIN users u ON u.id=w.user_id WHERE w.user_id=? ORDER BY w.id`, uid)
 	if err != nil {
 		return nil, err
 	}
@@ -375,7 +397,7 @@ func (s *Store) ListWatches(uid int64) ([]*Watch, error) {
 
 // WatchByID returns the watch only if it belongs to uid (pass 0 to skip the check).
 func (s *Store) WatchByID(id, uid int64) (*Watch, error) {
-	q := `SELECT ` + watchCols + ` FROM watches w JOIN users u ON u.id=w.user_id WHERE w.id=?`
+	q := `SELECT ` + s.watchCols() + ` FROM watches w JOIN users u ON u.id=w.user_id WHERE w.id=?`
 	args := []any{id}
 	if uid != 0 {
 		q += ` AND w.user_id=?`
@@ -389,7 +411,7 @@ func (s *Store) WatchByID(id, uid int64) (*Watch, error) {
 }
 
 func (s *Store) DueWatches(limit int) ([]*Watch, error) {
-	rows, err := s.db.Query(`SELECT `+watchCols+` FROM watches w JOIN users u ON u.id=w.user_id
+	rows, err := s.db.Query(`SELECT `+s.watchCols()+` FROM watches w JOIN users u ON u.id=w.user_id
 		WHERE w.paused=0 AND w.failures<? AND w.next_check_at<=? ORDER BY w.next_check_at LIMIT ?`, MaxFailures, s.now(), limit)
 	if err != nil {
 		return nil, err
@@ -447,14 +469,14 @@ func (s *Store) DeleteWatch(uid, id int64) error {
 
 // ---- results ----
 
-// guardTx re-reads the watch inside the transaction that is about to record a
+// guard re-reads the watch inside the transaction that is about to record a
 // check result. It returns ErrStale if the watch is gone, paused or edited
 // since the snapshot (ver) was taken, and whether the owner may still receive
 // alerts.
-func guardTx(tx *sql.Tx, id int64, ver *int64) (alertsOK bool, err error) {
+func (s *Store) guard(tx *sql.Tx, id int64, ver *int64) (alertsOK bool, err error) {
 	var version int64
 	var paused, ok int
-	err = tx.QueryRow(`SELECT w.version, w.paused, (u.alerts_enabled=1 AND u.consent_at IS NOT NULL)
+	err = tx.QueryRow(`SELECT w.version, w.paused, `+s.allowedSQL()+`
 		FROM watches w JOIN users u ON u.id=w.user_id WHERE w.id=?`, id).Scan(&version, &paused, &ok)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, ErrStale
@@ -471,9 +493,12 @@ func guardTx(tx *sql.Tx, id int64, ver *int64) (alertsOK bool, err error) {
 // QueuedAlert is an alert to be written to the outbox in the same transaction
 // as the check result that caused it.
 type QueuedAlert struct {
-	Kind  string
-	Price int64
-	Msg   Message
+	Kind     string
+	Price    int64
+	Msg      Message
+	Old      *int64 // previous price, for the dashboard notification
+	Target   *int64
+	Currency string
 }
 
 // enqueueTx writes an alert to the outbox. The unique event key
@@ -489,9 +514,9 @@ func enqueueTx(tx *sql.Tx, watchID int64, a *QueuedAlert, now int64) error {
 	}
 	params, _ := json.Marshal(a.Msg.Params)
 	key := fmt.Sprintf("%d:%s:%d", watchID, a.Kind, a.Price)
-	if _, err := tx.Exec(`INSERT OR IGNORE INTO outbox(user_id,watch_id,kind,price_pence,event_key,text,params,next_attempt_at,created_at,watch_version)
-		SELECT user_id,?,?,?,?,?,?,?,?,version FROM watches WHERE id=?`,
-		watchID, a.Kind, a.Price, key, a.Msg.Text, string(params), now, now, watchID); err != nil {
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO outbox(user_id,watch_id,kind,price_pence,event_key,text,params,next_attempt_at,created_at,watch_version,old_pence,target_pence,currency)
+		SELECT user_id,?,?,?,?,?,?,?,?,version,?,?,? FROM watches WHERE id=?`,
+		watchID, a.Kind, a.Price, key, a.Msg.Text, string(params), now, now, a.Old, a.Target, a.Currency, watchID); err != nil {
 		return err
 	}
 	_, err := tx.Exec(`INSERT INTO alerts_sent(watch_id,kind,price_pence,sent_at) VALUES(?,?,?,?)`, watchID, a.Kind, a.Price, now)
@@ -532,7 +557,7 @@ func (s *Store) RecordObservation(id int64, o Observation, next int64, base *int
 	}
 	defer tx.Rollback()
 	now := s.now()
-	alertsOK, err := guardTx(tx, id, o.Version)
+	alertsOK, err := s.guard(tx, id, o.Version)
 	if err != nil {
 		return err
 	}
@@ -575,7 +600,7 @@ func (s *Store) RecordBasisChange(id int64, o Observation, next int64) error {
 	}
 	defer tx.Rollback()
 	now := s.now()
-	if _, err := guardTx(tx, id, o.Version); err != nil {
+	if _, err := s.guard(tx, id, o.Version); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`UPDATE watches SET status='ok', last_error='', last_method=?, last_checked_at=?, next_check_at=?,
@@ -617,7 +642,7 @@ func (s *Store) RecordSoldOut(id int64, next int64, ver *int64) error {
 	}
 	defer tx.Rollback()
 	now := s.now()
-	if _, err := guardTx(tx, id, ver); err != nil {
+	if _, err := s.guard(tx, id, ver); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`UPDATE watches SET status='ok', sold_out=1, last_error='', last_checked_at=?, next_check_at=?, failures=0, failure_notified=0 WHERE id=?`,
@@ -639,7 +664,7 @@ func (s *Store) RecordNotModified(id int64, next int64, ver *int64) error {
 	}
 	defer tx.Rollback()
 	now := s.now()
-	if _, err := guardTx(tx, id, ver); err != nil {
+	if _, err := s.guard(tx, id, ver); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`UPDATE watches SET status='ok', last_error='', last_checked_at=?, next_check_at=?, failures=0, failure_notified=0 WHERE id=?`,
@@ -661,7 +686,7 @@ func (s *Store) RecordFailure(id int64, status, reason string, failures int, nex
 	}
 	defer tx.Rollback()
 	now := s.now()
-	alertsOK, err := guardTx(tx, id, ver)
+	alertsOK, err := s.guard(tx, id, ver)
 	if err != nil {
 		return err
 	}

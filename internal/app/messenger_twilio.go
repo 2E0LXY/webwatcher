@@ -94,6 +94,8 @@ func (t *TwilioMessenger) Send(ctx context.Context, msg Message) error {
 // NewMessenger builds the messenger selected by configuration.
 func NewMessenger(c Config) Messenger {
 	switch c.Messenger {
+	case "dashboard":
+		return &DashboardMessenger{}
 	case "meta":
 		return NewMetaMessenger(c)
 	case "twilio":

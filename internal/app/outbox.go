@@ -29,12 +29,17 @@ type outboxRow struct {
 	Params   []string
 	Attempts int
 	Phone    string
+	WatchID  int64
+	Price    int64
+	Old      *int64
+	Target   *int64
+	Currency string
 	Allowed  bool
 	Fresh    bool // the watch still exists, is not paused and has not been edited since the alert was queued
 }
 
 func (s *Store) dueOutbox(limit int) ([]outboxRow, error) {
-	rows, err := s.db.Query(`SELECT o.id,o.user_id,o.kind,o.text,o.params,o.attempts,u.phone,(u.alerts_enabled=1 AND u.consent_at IS NOT NULL), (w.paused=0 AND w.version=o.watch_version)
+	rows, err := s.db.Query(`SELECT o.id,o.user_id,o.kind,o.text,o.params,o.attempts,u.phone,o.watch_id,o.price_pence,o.old_pence,o.target_pence,o.currency,`+s.allowedSQL()+`, (w.paused=0 AND w.version=o.watch_version)
 		FROM outbox o JOIN users u ON u.id=o.user_id JOIN watches w ON w.id=o.watch_id
 		WHERE o.status='queued' AND o.next_attempt_at<=? ORDER BY o.id LIMIT ?`, s.now(), limit)
 	if err != nil {
@@ -46,7 +51,7 @@ func (s *Store) dueOutbox(limit int) ([]outboxRow, error) {
 		var r outboxRow
 		var params string
 		var allowed, fresh int
-		if err := rows.Scan(&r.ID, &r.UserID, &r.Kind, &r.Text, &params, &r.Attempts, &r.Phone, &allowed, &fresh); err != nil {
+		if err := rows.Scan(&r.ID, &r.UserID, &r.Kind, &r.Text, &params, &r.Attempts, &r.Phone, &r.WatchID, &r.Price, &r.Old, &r.Target, &r.Currency, &allowed, &fresh); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(params), &r.Params)
@@ -169,6 +174,19 @@ func (s *Sender) RunOnce(ctx context.Context) int {
 		}
 		if !r.Fresh {
 			s.store.finishOutbox(r.ID, OutSuppressed, r.Attempts, 0, "watch was paused or edited after the alert was queued")
+			continue
+		}
+		if _, dash := s.msgr.(*DashboardMessenger); dash {
+			// Delivery is a row insert: no network, so no send budget.
+			if err := s.store.deliverNotification(r); err != nil {
+				slog.Error("outbox: notification insert", "outbox", r.ID, "err", RedactPII(err.Error()))
+				attempts := r.Attempts + 1
+				if attempts >= OutboxMaxAttempts {
+					s.store.finishOutbox(r.ID, OutFailed, attempts, 0, RedactPII(err.Error()))
+				} else {
+					s.store.finishOutbox(r.ID, OutQueued, attempts, s.clock.Now().Add(outboxBackoff(attempts)).Unix(), RedactPII(err.Error()))
+				}
+			}
 			continue
 		}
 		ok, err := s.store.TryReserveSend("alert", s.budget, s.budget)

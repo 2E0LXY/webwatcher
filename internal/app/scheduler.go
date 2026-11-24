@@ -161,7 +161,8 @@ func (s *Scheduler) onSuccess(ctx context.Context, w *Watch, res *Result) {
 	w.Currency = res.Currency
 	var qa *QueuedAlert
 	if kind != "" && w.AlertsOn {
-		qa = &QueuedAlert{Kind: kind, Price: res.PricePence, Msg: BuildAlertMessage(kind, w, w.AlertBase, res.PricePence, "", s.baseURL)}
+		qa = &QueuedAlert{Kind: kind, Price: res.PricePence, Msg: BuildAlertMessage(kind, w, w.AlertBase, res.PricePence, "", s.baseURL),
+			Old: w.AlertBase, Target: w.TargetPence, Currency: res.Currency}
 	}
 	// The price update and its alert are committed together; the sender loop delivers it.
 	if err := s.store.RecordObservation(w.ID, obs, next, &res.PricePence, qa); err != nil && !errors.Is(err, ErrStale) {

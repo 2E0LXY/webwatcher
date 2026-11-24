@@ -121,7 +121,7 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		return c, errors.New("WW_MESSENGER=log is for local development only: it needs WW_DEV=1 and an http WW_BASE_URL; set WW_MESSENGER=meta or twilio for production")
 	}
 	switch c.Messenger {
-	case "log":
+	case "log", "dashboard":
 	case "meta":
 		if c.WAPhoneID == "" || c.WAToken == "" {
 			return c, errors.New("WW_MESSENGER=meta needs WW_WA_PHONE_ID and WW_WA_TOKEN")
@@ -131,7 +131,7 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 			return c, errors.New("WW_MESSENGER=twilio needs WW_TWILIO_SID, WW_TWILIO_TOKEN and WW_TWILIO_FROM")
 		}
 	default:
-		return c, fmt.Errorf("unknown WW_MESSENGER %q (use log, meta or twilio)", c.Messenger)
+		return c, fmt.Errorf("unknown WW_MESSENGER %q (use dashboard, meta or twilio; log is for development)", c.Messenger)
 	}
 	return c, nil
 }

@@ -131,6 +131,24 @@ var migrations = []string{
 	`ALTER TABLE send_log ADD COLUMN kind TEXT NOT NULL DEFAULT 'alert';`,
 	`ALTER TABLE users ADD COLUMN consent_source TEXT;
 	ALTER TABLE login_tokens ADD COLUMN consent_source TEXT;`,
+	`ALTER TABLE outbox ADD COLUMN old_pence INTEGER;
+	ALTER TABLE outbox ADD COLUMN target_pence INTEGER;
+	ALTER TABLE outbox ADD COLUMN currency TEXT NOT NULL DEFAULT '';
+	CREATE TABLE notifications (
+		id INTEGER PRIMARY KEY,
+		user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		watch_id INTEGER REFERENCES watches(id) ON DELETE SET NULL,
+		kind TEXT NOT NULL CHECK (kind IN ('changed','below_target','system')),
+		title TEXT NOT NULL,
+		body TEXT NOT NULL,
+		price_pence INTEGER,
+		old_pence INTEGER,
+		target_pence INTEGER,
+		currency TEXT NOT NULL DEFAULT '',
+		created_at INTEGER NOT NULL,
+		read_at INTEGER
+	);
+	CREATE INDEX notifications_user ON notifications(user_id, id);`,
 }
 
 // OpenDB opens (creating if needed) the SQLite database in dir and migrates it.
