@@ -65,6 +65,10 @@ type CheckMeta struct {
 	Class  string
 	Timing Timing
 	Retry  int // 0 for a normal check, 1..3 for the quick retries
+	// State to store with a failure (not logged): how many quick retries have been
+	// scheduled in this run of transient failures, and whether the next check is one.
+	QuickRetry   int
+	QuickPending bool
 }
 
 func firstMeta(m []CheckMeta) CheckMeta {

@@ -177,6 +177,8 @@ var migrations = []string{
 	ALTER TABLE check_log ADD COLUMN ttfb_ms INTEGER NOT NULL DEFAULT 0;
 	ALTER TABLE check_log ADD COLUMN total_ms INTEGER NOT NULL DEFAULT 0;
 	ALTER TABLE check_log ADD COLUMN retry INTEGER NOT NULL DEFAULT 0;`,
+	`ALTER TABLE watches ADD COLUMN quick_retry INTEGER NOT NULL DEFAULT 0;
+	ALTER TABLE watches ADD COLUMN quick_pending INTEGER NOT NULL DEFAULT 0;`,
 }
 
 // OpenDB opens (creating if needed) the SQLite database in dir and migrates it.

@@ -305,6 +305,7 @@ type watchView struct {
 	CurrencyMismatch bool
 	MismatchNote     string
 	TargetCurrency   string
+	RetryNote        string
 }
 
 type curOpt struct {
@@ -481,6 +482,9 @@ func (s *Server) view(w *Watch) watchView {
 		v.Checked = time.Unix(*w.LastCheckedAt, 0).In(london).Format("2 Jan 2006, 15:04")
 	}
 	v.TargetCurrency = w.TargetCurrency
+	if w.QuickPending && !w.Paused {
+		v.RetryNote = fmt.Sprintf("Quick retry %d of %d is scheduled; the normal interval resumes if they fail.", w.QuickRetry, len(quickRetryDelays))
+	}
 	v.Stopped = w.Failures >= MaxFailures
 	if w.CurrencyMismatch && w.TargetPence != nil {
 		v.CurrencyMismatch = true

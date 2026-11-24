@@ -374,12 +374,14 @@ type Watch struct {
 	Version          int64  // bumped on target, pause and basis edits; guards queued alerts against stale snapshots
 	TargetCurrency   string // the currency the target is expressed in (default GBP)
 	CurrencyMismatch bool   // the page shows a different currency from the target: below-target is not evaluated
+	QuickRetry       int    // quick retries scheduled in the current run of transient failures (0..3)
+	QuickPending     bool   // the next check is one of those quick retries
 }
 
 const watchColsTpl = `w.id,w.user_id,w.url,w.label,w.selector,w.target_pence,w.interval_min,w.paused,w.status,
 	w.last_price_pence,w.alert_base_pence,w.currency,w.last_method,w.last_error,w.last_checked_at,
 	w.next_check_at,w.failures,w.failure_notified,w.created_at,u.phone,{ALLOWED},
-	w.basis,w.basis_changed,w.obs_price_pence,w.obs_currency,w.obs_basis,w.sold_out,w.etag,w.last_modified,w.version,w.target_currency,w.currency_mismatch`
+	w.basis,w.basis_changed,w.obs_price_pence,w.obs_currency,w.obs_basis,w.sold_out,w.etag,w.last_modified,w.version,w.target_currency,w.currency_mismatch,w.quick_retry,w.quick_pending`
 
 func (s *Store) watchCols() string {
 	return strings.Replace(watchColsTpl, "{ALLOWED}", s.allowedSQL(), 1)
@@ -389,13 +391,14 @@ type rowScanner interface{ Scan(...any) error }
 
 func scanWatch(r rowScanner) (*Watch, error) {
 	var w Watch
-	var paused, fn, ao, bc, so, cm int
+	var paused, fn, ao, bc, so, cm, qp int
 	err := r.Scan(&w.ID, &w.UserID, &w.URL, &w.Label, &w.Selector, &w.TargetPence, &w.IntervalMin, &paused, &w.Status,
 		&w.LastPricePence, &w.AlertBase, &w.Currency, &w.LastMethod, &w.LastError, &w.LastCheckedAt,
 		&w.NextCheckAt, &w.Failures, &fn, &w.CreatedAt, &w.Phone, &ao,
-		&w.Basis, &bc, &w.ObsPence, &w.ObsCurrency, &w.ObsBasis, &so, &w.ETag, &w.LastModified, &w.Version, &w.TargetCurrency, &cm)
+		&w.Basis, &bc, &w.ObsPence, &w.ObsCurrency, &w.ObsBasis, &so, &w.ETag, &w.LastModified, &w.Version, &w.TargetCurrency, &cm, &w.QuickRetry, &qp)
 	w.Paused, w.FailureNotif, w.AlertsOn, w.BasisChanged, w.SoldOut = paused != 0, fn != 0, ao != 0, bc != 0, so != 0
 	w.CurrencyMismatch = cm != 0
+	w.QuickPending = qp != 0
 	return &w, err
 }
 
@@ -515,7 +518,7 @@ func (s *Store) SetPaused(uid, id int64, paused bool) error {
 	if paused {
 		return s.exec1(uid, id, `UPDATE watches SET paused=1, version=version+1`)
 	}
-	if err := s.exec1(uid, id, `UPDATE watches SET paused=0, version=version+1, failures=0, failure_notified=0,
+	if err := s.exec1(uid, id, `UPDATE watches SET paused=0, version=version+1, failures=0, failure_notified=0, quick_retry=0, quick_pending=0,
 		status=CASE WHEN status IN ('blocked','error','noprice','disallowed') THEN 'pending' ELSE status END, next_check_at=?`, s.now()); err != nil {
 		return err
 	}
@@ -634,7 +637,7 @@ func (s *Store) RecordObservation(id int64, o Observation, next int64, base *int
 		alert = nil
 	}
 	if _, err := tx.Exec(`UPDATE watches SET status='ok', last_price_pence=?, currency=?, basis=?, last_method=?, last_error='',
-		last_checked_at=?, next_check_at=?, failures=0, failure_notified=0, alert_base_pence=?, sold_out=0,
+		last_checked_at=?, next_check_at=?, failures=0, failure_notified=0, quick_retry=0, quick_pending=0, alert_base_pence=?, sold_out=0,
 		basis_changed=0, obs_price_pence=NULL, obs_currency='', obs_basis='', etag=?, last_modified=?, currency_mismatch=? WHERE id=?`,
 		price, cur, o.Basis, method, now, next, base, o.ETag, o.LastModified, o.CurrencyMismatch, id); err != nil {
 		return err
@@ -673,7 +676,7 @@ func (s *Store) RecordBasisChange(id int64, o Observation, next int64) error {
 		return err
 	}
 	if _, err := tx.Exec(`UPDATE watches SET status='ok', last_error='', last_method=?, last_checked_at=?, next_check_at=?,
-		failures=0, failure_notified=0, sold_out=0, basis_changed=1, obs_price_pence=?, obs_currency=?, obs_basis=?, etag=?, last_modified=?, currency_mismatch=? WHERE id=?`,
+		failures=0, failure_notified=0, quick_retry=0, quick_pending=0, sold_out=0, basis_changed=1, obs_price_pence=?, obs_currency=?, obs_basis=?, etag=?, last_modified=?, currency_mismatch=? WHERE id=?`,
 		o.Method, now, next, o.Price, o.Currency, o.Basis, o.ETag, o.LastModified, o.CurrencyMismatch, id); err != nil {
 		return err
 	}
@@ -714,7 +717,7 @@ func (s *Store) RecordSoldOut(id int64, next int64, ver *int64, meta ...CheckMet
 	if _, err := s.guard(tx, id, ver); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`UPDATE watches SET status='ok', sold_out=1, last_error='', last_checked_at=?, next_check_at=?, failures=0, failure_notified=0 WHERE id=?`,
+	if _, err := tx.Exec(`UPDATE watches SET status='ok', sold_out=1, last_error='', last_checked_at=?, next_check_at=?, failures=0, failure_notified=0, quick_retry=0, quick_pending=0 WHERE id=?`,
 		now, next, id); err != nil {
 		return err
 	}
@@ -736,7 +739,7 @@ func (s *Store) RecordNotModified(id int64, next int64, ver *int64, meta ...Chec
 	if _, err := s.guard(tx, id, ver); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`UPDATE watches SET status='ok', last_error='', last_checked_at=?, next_check_at=?, failures=0, failure_notified=0 WHERE id=?`,
+	if _, err := tx.Exec(`UPDATE watches SET status='ok', last_error='', last_checked_at=?, next_check_at=?, failures=0, failure_notified=0, quick_retry=0, quick_pending=0 WHERE id=?`,
 		now, next, id); err != nil {
 		return err
 	}
@@ -749,6 +752,7 @@ func (s *Store) RecordNotModified(id int64, next int64, ver *int64, meta ...Chec
 // RecordFailure stores a failed check. status is one of error, blocked, stopped.
 // A non-nil notice is queued and the watch marked as notified, atomically.
 func (s *Store) RecordFailure(id int64, status, reason string, failures int, next int64, notice *QueuedAlert, ver *int64, meta ...CheckMeta) error {
+	m := firstMeta(meta)
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -762,8 +766,8 @@ func (s *Store) RecordFailure(id int64, status, reason string, failures int, nex
 	if !alertsOK {
 		notice = nil
 	}
-	if _, err := tx.Exec(`UPDATE watches SET status=?, last_error=?, failures=?, last_checked_at=?, next_check_at=? WHERE id=?`,
-		status, reason, failures, now, next, id); err != nil {
+	if _, err := tx.Exec(`UPDATE watches SET status=?, last_error=?, failures=?, last_checked_at=?, next_check_at=?, quick_retry=?, quick_pending=? WHERE id=?`,
+		status, reason, failures, now, next, m.QuickRetry, m.QuickPending, id); err != nil {
 		return err
 	}
 	if err := logCheck(tx, id, now, status, reason, meta...); err != nil {

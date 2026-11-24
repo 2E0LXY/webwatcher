@@ -197,27 +197,69 @@ func hostOf(raw string) string {
 // Limiter returns the per-host rate budget, so the fetcher can share it.
 func (s *Scheduler) Limiter() *HostLimiter { return s.hosts }
 
+// quickRetryDelays are the waits before the bounded quick retries that follow
+// a transient network failure. They are separate from the watch's normal
+// interval, so one dropped connection does not cost a whole interval (or more).
+var quickRetryDelays = []time.Duration{2 * time.Minute, 10 * time.Minute, 30 * time.Minute}
+
+// quickStrikes is how many consecutive-failure strikes the initial failure and
+// its quick retries can add up to; further quick retries are logged but not counted.
+const quickStrikes = 3
+
+// normalFailuresBeforeBackoff is how many failures at the normal interval are
+// tolerated, after the quick retries, before exponential backoff begins.
+const normalFailuresBeforeBackoff = 3
+
 func (s *Scheduler) onFailure(ctx context.Context, w *Watch, fail *CheckFailure) {
 	if fail.Status == "deferred" {
 		// Not a fault: try again once the other host's budget allows.
 		s.store.Defer(w.ID, s.clock.Now().Add(fail.RetryAfter+2*time.Second+s.jitter(10*time.Second)).Unix())
 		return
 	}
-	failures := w.Failures + 1
-	if fail.Status == "disallowed" {
-		failures = w.Failures // a policy outcome, not a fault: never counts towards stopping the watch
-	}
 	iv := s.interval(w)
-	// exponential backoff: interval * 2^failures, capped at 24h (or the interval if longer)
-	delay := iv
 	limit := max(24*time.Hour, iv)
-	for i := 0; i < failures && delay < limit; i++ {
-		delay *= 2
+	meta := metaOf(fail, nil)
+	if w.QuickPending {
+		meta.Retry = w.QuickRetry // this check was quick retry n
 	}
-	delay = min(delay, limit)
-	if fail.Status == "disallowed" {
+	failures := w.Failures + 1
+	var delay time.Duration
+	switch {
+	case fail.Status == "disallowed":
+		failures = w.Failures         // a policy outcome, not a fault: never counts towards stopping the watch
 		delay = max(iv, 24*time.Hour) // robots.txt is cached for 24 hours anyway
+	case fail.Status == "error" && transientClass(fail.Class):
+		if w.QuickPending || w.QuickRetry == 0 {
+			// The first failure of a run, or one of its quick retries.
+			failures = w.Failures
+			if failures < quickStrikes {
+				failures++
+			}
+			if w.QuickRetry < len(quickRetryDelays) {
+				delay = quickRetryDelays[w.QuickRetry]
+				meta.QuickRetry, meta.QuickPending = w.QuickRetry+1, true
+			} else {
+				delay = iv // the last quick retry failed: back to the normal interval
+				meta.QuickRetry = len(quickRetryDelays)
+			}
+		} else {
+			// Quick retries are used up: normal-interval failures, with
+			// exponential backoff only after normalFailuresBeforeBackoff of them.
+			meta.QuickRetry = len(quickRetryDelays)
+			delay = iv
+			for i := quickStrikes + normalFailuresBeforeBackoff; i < failures && delay < limit; i++ {
+				delay *= 2
+			}
+		}
+	default:
+		// Blocks, pages without a price and other failures: no quick retries.
+		// Exponential backoff: interval * 2^failures, capped at 24h (or the interval if longer).
+		delay = iv
+		for i := 0; i < failures && delay < limit; i++ {
+			delay *= 2
+		}
 	}
+	delay = min(delay, max(limit, fail.RetryAfter))
 	delay = max(delay, fail.RetryAfter) // always honour Retry-After
 	// Negative jitter must never undercut Retry-After.
 	total := max(delay+s.jitter(delay), fail.RetryAfter)
@@ -226,7 +268,7 @@ func (s *Scheduler) onFailure(ctx context.Context, w *Watch, fail *CheckFailure)
 	if failures >= MaxFailures && !w.FailureNotif && w.AlertsOn {
 		notice = &QueuedAlert{Kind: AlertFailed, Msg: BuildAlertMessage(AlertFailed, w, nil, 0, fail.Reason, s.baseURL)}
 	}
-	if err := s.store.RecordFailure(w.ID, fail.Status, fail.Reason, failures, next, notice, &w.Version, metaOf(fail, nil)); err != nil && !errors.Is(err, ErrStale) {
+	if err := s.store.RecordFailure(w.ID, fail.Status, fail.Reason, failures, next, notice, &w.Version, meta); err != nil && !errors.Is(err, ErrStale) {
 		slog.Error("record failure", "watch", w.ID, "host", hostOf(w.URL), "err", RedactPII(err.Error()))
 	}
 }

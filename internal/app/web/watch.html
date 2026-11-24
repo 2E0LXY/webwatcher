@@ -8,6 +8,7 @@
   <dt>Target</dt><dd>{{.Target}}</dd>
   <dt>Status</dt><dd><span class="badge {{.Status}}">{{.StatusTxt}}</span></dd>
   {{if .Reason}}<dt>Last problem</dt><dd>{{.Reason}}{{if .Kept}} (last valid price kept){{end}}</dd>{{end}}
+  {{if .RetryNote}}<dt>Retrying</dt><dd>{{.RetryNote}}</dd>{{end}}
   <dt>Last checked</dt><dd>{{.Checked}}</dd>
   <dt>Found by</dt><dd>{{if .Method}}{{.Method}}{{else}}–{{end}}</dd>
   <dt>Check every</dt><dd>{{.Interval}}</dd>
