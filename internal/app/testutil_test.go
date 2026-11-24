@@ -33,10 +33,14 @@ type fakeMessenger struct {
 	mu   sync.Mutex
 	sent []Message
 	err  error
+	hook func(Message) // called during Send, before it returns (tests change state mid-batch)
 }
 
 func (f *fakeMessenger) Name() string { return "fake" }
 func (f *fakeMessenger) Send(_ context.Context, m Message) error {
+	if f.hook != nil {
+		f.hook(m)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sent = append(f.sent, m)

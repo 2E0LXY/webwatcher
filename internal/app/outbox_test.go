@@ -303,3 +303,96 @@ func TestSendBudgetConfig(t *testing.T) {
 		t.Fatal("zero accepted")
 	}
 }
+
+// threeQueued queues one alert on each of three watches of the same user and
+// returns the watch ids.
+func threeQueued(t *testing.T, e *schedEnv) [3]int64 {
+	var ids [3]int64
+	for i := range ids {
+		ids[i] = e.add(t, fmt.Sprintf("https://shop.example.com/p%d", i), nil, 60)
+		if err := e.st.RecordSuccess(ids[i], 9000+int64(i), "GBP", "meta", 0, nil, qa(AlertChanged, 9000+int64(i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return ids
+}
+
+func TestSenderRevalidatesEachRowOptOutMidBatch(t *testing.T) {
+	e := newSchedEnv(t)
+	threeQueued(t, e)
+	done := false
+	e.m.hook = func(Message) { // the user replies STOP while the first message is in flight
+		if done {
+			return
+		}
+		done = true
+		if err := e.st.SetAlertsEnabled(e.uid, false); err != nil {
+			t.Error(err)
+		}
+	}
+	e.snd.RunOnce(context.Background())
+	if n := len(e.m.Sent()); n != 1 {
+		t.Fatalf("sent %d, want only the in-flight one", n)
+	}
+	c, _ := e.st.OutboxCounts()
+	if c[OutQueued] != 0 {
+		t.Fatalf("%v", c)
+	}
+}
+
+func TestSenderRevalidatesEachRowWatchDeletedMidBatch(t *testing.T) {
+	e := newSchedEnv(t)
+	ids := threeQueued(t, e)
+	done := false
+	e.m.hook = func(Message) {
+		if done {
+			return
+		}
+		done = true
+		if err := e.st.DeleteWatch(e.uid, ids[1]); err != nil {
+			t.Error(err)
+		}
+	}
+	e.snd.RunOnce(context.Background())
+	if n := len(e.m.Sent()); n != 2 {
+		t.Fatalf("sent %d, want 2 (the deleted watch's alert dropped)", n)
+	}
+	for _, m := range e.m.Sent() {
+		if contains(m.Text, "9001") || contains(m.Text, "90.01") {
+			t.Fatalf("sent the deleted watch's alert: %q", m.Text)
+		}
+	}
+}
+
+func TestSenderRevalidatesEachRowPauseEditAndDisable(t *testing.T) {
+	for name, act := range map[string]func(e *schedEnv, ids [3]int64) error{
+		"pause": func(e *schedEnv, ids [3]int64) error { return e.st.SetPaused(e.uid, ids[2], true) },
+		"edit":  func(e *schedEnv, ids [3]int64) error { return e.st.SetTarget(e.uid, ids[1], p(1)) },
+		"disable": func(e *schedEnv, ids [3]int64) error {
+			_, err := e.st.db.Exec(`UPDATE users SET disabled_at=1 WHERE id=?`, e.uid)
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newSchedEnv(t)
+			ids := threeQueued(t, e)
+			done := false
+			e.m.hook = func(Message) {
+				if !done {
+					done = true
+					if err := act(e, ids); err != nil {
+						t.Error(err)
+					}
+				}
+			}
+			e.snd.RunOnce(context.Background())
+			want := 2
+			if name == "disable" {
+				want = 1
+			}
+			if n := len(e.m.Sent()); n != want {
+				t.Fatalf("sent %d, want %d", n, want)
+			}
+		})
+	}
+}

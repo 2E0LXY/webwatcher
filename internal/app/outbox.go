@@ -2,7 +2,9 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"regexp"
 	"time"
@@ -34,13 +36,11 @@ type outboxRow struct {
 	Old      *int64
 	Target   *int64
 	Currency string
-	Allowed  bool
-	Fresh    bool // the watch still exists, is not paused and has not been edited since the alert was queued
 }
 
 func (s *Store) dueOutbox(limit int) ([]outboxRow, error) {
-	rows, err := s.db.Query(`SELECT o.id,o.user_id,o.kind,o.text,o.params,o.attempts,u.phone,o.watch_id,o.price_pence,o.old_pence,o.target_pence,o.currency,`+s.allowedSQL()+`, (w.paused=0 AND w.version=o.watch_version)
-		FROM outbox o JOIN users u ON u.id=o.user_id JOIN watches w ON w.id=o.watch_id
+	rows, err := s.db.Query(`SELECT o.id,o.user_id,o.kind,o.text,o.params,o.attempts,u.phone,o.watch_id,o.price_pence,o.old_pence,o.target_pence,o.currency
+		FROM outbox o JOIN users u ON u.id=o.user_id
 		WHERE o.status='queued' AND o.next_attempt_at<=? ORDER BY o.id LIMIT ?`, s.now(), limit)
 	if err != nil {
 		return nil, err
@@ -50,12 +50,10 @@ func (s *Store) dueOutbox(limit int) ([]outboxRow, error) {
 	for rows.Next() {
 		var r outboxRow
 		var params string
-		var allowed, fresh int
-		if err := rows.Scan(&r.ID, &r.UserID, &r.Kind, &r.Text, &params, &r.Attempts, &r.Phone, &r.WatchID, &r.Price, &r.Old, &r.Target, &r.Currency, &allowed, &fresh); err != nil {
+		if err := rows.Scan(&r.ID, &r.UserID, &r.Kind, &r.Text, &params, &r.Attempts, &r.Phone, &r.WatchID, &r.Price, &r.Old, &r.Target, &r.Currency); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(params), &r.Params)
-		r.Allowed, r.Fresh = allowed != 0, fresh != 0
 		out = append(out, r)
 	}
 	return out, rows.Err()
@@ -168,11 +166,21 @@ func (s *Sender) RunOnce(ctx context.Context) int {
 		if ctx.Err() != nil {
 			break
 		}
-		if !r.Allowed {
-			s.store.finishOutbox(r.ID, OutSuppressed, r.Attempts, 0, "user opted out or has not consented")
+		// Revalidate this row now, not at the start of the batch: an opt-out or
+		// deletion during the batch must stop the rows still waiting.
+		state, verr := s.store.revalidateOutbox(r.ID)
+		if verr != nil {
+			slog.Error("outbox: revalidate", "outbox", r.ID, "err", RedactPII(verr.Error()))
+			break
+		}
+		if state == revalGone {
 			continue
 		}
-		if !r.Fresh {
+		if state == revalBarred {
+			s.store.finishOutbox(r.ID, OutSuppressed, r.Attempts, 0, "user opted out, is disabled or has not consented")
+			continue
+		}
+		if state == revalStale {
 			s.store.finishOutbox(r.ID, OutSuppressed, r.Attempts, 0, "watch was paused or edited after the alert was queued")
 			continue
 		}
@@ -229,4 +237,34 @@ var (
 func RedactPII(s string) string {
 	s = urlRe.ReplaceAllString(s, "$1")
 	return digitsRe.ReplaceAllStringFunc(s, MaskPhone)
+}
+
+// Outcomes of revalidating a queued row immediately before it is sent.
+const (
+	revalOK     = iota
+	revalGone   // the row, its watch or its user no longer exists, or it is no longer queued
+	revalBarred // the user is disabled, opted out or has no consent for the current messenger
+	revalStale  // the watch is paused or was edited after the alert was queued
+)
+
+// revalidateOutbox re-reads the current state of one queued row, its watch and
+// its owner. The sender calls it for every row immediately before sending, not
+// once per batch, so an opt-out, a deletion, a pause or an edit that happens
+// while a batch is in flight stops the rows that have not yet been sent.
+func (s *Store) revalidateOutbox(id int64) (int, error) {
+	var allowed, disabled, fresh int
+	err := s.db.QueryRow(`SELECT `+s.allowedSQL()+`, u.disabled_at IS NOT NULL, (w.paused=0 AND w.version=o.watch_version)
+		FROM outbox o JOIN users u ON u.id=o.user_id JOIN watches w ON w.id=o.watch_id
+		WHERE o.id=? AND o.status='queued'`, id).Scan(&allowed, &disabled, &fresh)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return revalGone, nil
+	case err != nil:
+		return revalGone, err
+	case disabled != 0 || allowed == 0:
+		return revalBarred, nil
+	case fresh == 0:
+		return revalStale, nil
+	}
+	return revalOK, nil
 }
