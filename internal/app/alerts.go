@@ -14,31 +14,27 @@ const (
 
 // AlertInput is everything the alert rules need.
 type AlertInput struct {
-	Prev        *int64 // price at the last successful alert baseline (nil on first check)
-	Cur         int64
-	Target      *int64
-	LastChanged *int64 // price of the last "changed" alert sent
-	LastBelow   *int64 // price of the last "below" alert sent
+	Prev   *int64 // price at the alert baseline (nil on the first check, or after the target or basis was reset)
+	Cur    int64
+	Target *int64
 }
 
 // EvaluateAlert applies the alert rules. It returns "", AlertChanged or AlertBelow.
+// Alerts fire on transitions, never because of a price seen before:
 //
-//   - below: a target is set, the price is at or under it, and the previous
-//     price was above it (or this is the first check). It supersedes "changed",
-//     so one price move produces one message.
-//   - changed: the price differs from the previous one by at least a penny.
-//   - the same alert is never repeated for the same price.
+//   - below: a target is set and the price crosses from above it to at or
+//     under it (or this is the first check after the baseline was reset, which
+//     happens on the first check ever and whenever the target is edited). It
+//     supersedes "changed", so one price move produces one message. A later
+//     recovery above the target re-arms it.
+//   - changed: the price differs from the baseline by at least a penny.
+//
+// The baseline moves on every check, so an unchanged price never repeats an alert.
 func EvaluateAlert(in AlertInput) string {
 	if in.Target != nil && in.Cur <= *in.Target && (in.Prev == nil || *in.Prev > *in.Target) {
-		if in.LastBelow != nil && *in.LastBelow == in.Cur {
-			return ""
-		}
 		return AlertBelow
 	}
 	if in.Prev != nil && in.Cur != *in.Prev {
-		if in.LastChanged != nil && *in.LastChanged == in.Cur {
-			return ""
-		}
 		return AlertChanged
 	}
 	return ""

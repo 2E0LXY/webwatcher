@@ -13,6 +13,7 @@ var (
 	ErrWatchCap     = errors.New("watch limit reached")
 	ErrNotFound     = errors.New("not found")
 	ErrNoConsent    = errors.New("no recorded consent")
+	ErrStale        = errors.New("watch changed, paused or deleted since the check began")
 )
 
 const (
@@ -283,12 +284,13 @@ type Watch struct {
 	SoldOut        bool
 	ETag           string
 	LastModified   string
+	Version        int64 // bumped on target, pause and basis edits; guards queued alerts against stale snapshots
 }
 
 const watchCols = `w.id,w.user_id,w.url,w.label,w.selector,w.target_pence,w.interval_min,w.paused,w.status,
 	w.last_price_pence,w.alert_base_pence,w.currency,w.last_method,w.last_error,w.last_checked_at,
 	w.next_check_at,w.failures,w.failure_notified,w.created_at,u.phone,(u.alerts_enabled=1 AND u.consent_at IS NOT NULL),
-	w.basis,w.basis_changed,w.obs_price_pence,w.obs_currency,w.obs_basis,w.sold_out,w.etag,w.last_modified`
+	w.basis,w.basis_changed,w.obs_price_pence,w.obs_currency,w.obs_basis,w.sold_out,w.etag,w.last_modified,w.version`
 
 type rowScanner interface{ Scan(...any) error }
 
@@ -298,7 +300,7 @@ func scanWatch(r rowScanner) (*Watch, error) {
 	err := r.Scan(&w.ID, &w.UserID, &w.URL, &w.Label, &w.Selector, &w.TargetPence, &w.IntervalMin, &paused, &w.Status,
 		&w.LastPricePence, &w.AlertBase, &w.Currency, &w.LastMethod, &w.LastError, &w.LastCheckedAt,
 		&w.NextCheckAt, &w.Failures, &fn, &w.CreatedAt, &w.Phone, &ao,
-		&w.Basis, &bc, &w.ObsPence, &w.ObsCurrency, &w.ObsBasis, &so, &w.ETag, &w.LastModified)
+		&w.Basis, &bc, &w.ObsPence, &w.ObsCurrency, &w.ObsBasis, &so, &w.ETag, &w.LastModified, &w.Version)
 	w.Paused, w.FailureNotif, w.AlertsOn, w.BasisChanged, w.SoldOut = paused != 0, fn != 0, ao != 0, bc != 0, so != 0
 	return &w, err
 }
@@ -398,7 +400,7 @@ func (s *Store) exec1(uid, id int64, q string, args ...any) error {
 // SetTarget changes the target and resets the alert baseline so the next
 // check can raise a "below target" alert against the new target.
 func (s *Store) SetTarget(uid, id int64, target *int64) error {
-	return s.exec1(uid, id, `UPDATE watches SET target_pence=?, alert_base_pence=NULL`, target)
+	return s.exec1(uid, id, `UPDATE watches SET target_pence=?, alert_base_pence=NULL, version=version+1`, target)
 }
 
 func (s *Store) SetInterval(uid, id int64, mins int) error {
@@ -407,9 +409,9 @@ func (s *Store) SetInterval(uid, id int64, mins int) error {
 
 func (s *Store) SetPaused(uid, id int64, paused bool) error {
 	if paused {
-		return s.exec1(uid, id, `UPDATE watches SET paused=1`)
+		return s.exec1(uid, id, `UPDATE watches SET paused=1, version=version+1`)
 	}
-	if err := s.exec1(uid, id, `UPDATE watches SET paused=0, failures=0, failure_notified=0,
+	if err := s.exec1(uid, id, `UPDATE watches SET paused=0, version=version+1, failures=0, failure_notified=0,
 		status=CASE WHEN status IN ('blocked','error','noprice','disallowed') THEN 'pending' ELSE status END, next_check_at=?`, s.now()); err != nil {
 		return err
 	}
@@ -424,6 +426,27 @@ func (s *Store) DeleteWatch(uid, id int64) error {
 
 // ---- results ----
 
+// guardTx re-reads the watch inside the transaction that is about to record a
+// check result. It returns ErrStale if the watch is gone, paused or edited
+// since the snapshot (ver) was taken, and whether the owner may still receive
+// alerts.
+func guardTx(tx *sql.Tx, id int64, ver *int64) (alertsOK bool, err error) {
+	var version int64
+	var paused, ok int
+	err = tx.QueryRow(`SELECT w.version, w.paused, (u.alerts_enabled=1 AND u.consent_at IS NOT NULL)
+		FROM watches w JOIN users u ON u.id=w.user_id WHERE w.id=?`, id).Scan(&version, &paused, &ok)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, ErrStale
+	}
+	if err != nil {
+		return false, err
+	}
+	if paused != 0 || (ver != nil && *ver != version) {
+		return false, ErrStale
+	}
+	return ok != 0, nil
+}
+
 // QueuedAlert is an alert to be written to the outbox in the same transaction
 // as the check result that caused it.
 type QueuedAlert struct {
@@ -437,14 +460,16 @@ type QueuedAlert struct {
 // finished alerts of the same kind at other prices are forgotten first, so a
 // price that oscillates (99 -> 105 -> 99 -> 105) can alert again.
 func enqueueTx(tx *sql.Tx, watchID int64, a *QueuedAlert, now int64) error {
-	if _, err := tx.Exec(`DELETE FROM outbox WHERE watch_id=? AND kind=? AND price_pence<>? AND status<>'queued'`,
-		watchID, a.Kind, a.Price); err != nil {
+	// Alerts fire on transitions (see EvaluateAlert), so a finished alert of
+	// this kind never blocks a new one. The unique key only stops the same
+	// event being queued twice at once.
+	if _, err := tx.Exec(`DELETE FROM outbox WHERE watch_id=? AND kind=? AND status<>'queued'`, watchID, a.Kind); err != nil {
 		return err
 	}
 	params, _ := json.Marshal(a.Msg.Params)
 	key := fmt.Sprintf("%d:%s:%d", watchID, a.Kind, a.Price)
-	if _, err := tx.Exec(`INSERT OR IGNORE INTO outbox(user_id,watch_id,kind,price_pence,event_key,text,params,next_attempt_at,created_at)
-		SELECT user_id,?,?,?,?,?,?,?,? FROM watches WHERE id=?`,
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO outbox(user_id,watch_id,kind,price_pence,event_key,text,params,next_attempt_at,created_at,watch_version)
+		SELECT user_id,?,?,?,?,?,?,?,?,version FROM watches WHERE id=?`,
 		watchID, a.Kind, a.Price, key, a.Msg.Text, string(params), now, now, watchID); err != nil {
 		return err
 	}
@@ -466,6 +491,9 @@ type Observation struct {
 	Basis        string
 	ETag         string
 	LastModified string
+	// Version is the watch version the check started from. If the watch has
+	// been edited, paused or deleted since, the result is dropped (ErrStale).
+	Version *int64
 }
 
 // logCheck appends a diagnostics row. detail never holds URLs or numbers.
@@ -483,6 +511,13 @@ func (s *Store) RecordObservation(id int64, o Observation, next int64, base *int
 	}
 	defer tx.Rollback()
 	now := s.now()
+	alertsOK, err := guardTx(tx, id, o.Version)
+	if err != nil {
+		return err
+	}
+	if !alertsOK {
+		alert = nil
+	}
 	if _, err := tx.Exec(`UPDATE watches SET status='ok', last_price_pence=?, currency=?, basis=?, last_method=?, last_error='',
 		last_checked_at=?, next_check_at=?, failures=0, failure_notified=0, alert_base_pence=?, sold_out=0,
 		basis_changed=0, obs_price_pence=NULL, obs_currency='', obs_basis='', etag=?, last_modified=? WHERE id=?`,
@@ -519,6 +554,9 @@ func (s *Store) RecordBasisChange(id int64, o Observation, next int64) error {
 	}
 	defer tx.Rollback()
 	now := s.now()
+	if _, err := guardTx(tx, id, o.Version); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`UPDATE watches SET status='ok', last_error='', last_method=?, last_checked_at=?, next_check_at=?,
 		failures=0, failure_notified=0, sold_out=0, basis_changed=1, obs_price_pence=?, obs_currency=?, obs_basis=?, etag=?, last_modified=? WHERE id=?`,
 		o.Method, now, next, o.Price, o.Currency, o.Basis, o.ETag, o.LastModified, id); err != nil {
@@ -538,7 +576,7 @@ func (s *Store) RecordBasisChange(id int64, o Observation, next int64) error {
 // baseline is reset, as for a new target, so the next check starts afresh.
 func (s *Store) ConfirmBasis(uid, id int64) error {
 	res, err := s.db.Exec(`UPDATE watches SET last_price_pence=obs_price_pence, currency=obs_currency, basis=obs_basis,
-		alert_base_pence=NULL, basis_changed=0, obs_price_pence=NULL, obs_currency='', obs_basis=''
+		alert_base_pence=NULL, basis_changed=0, obs_price_pence=NULL, obs_currency='', obs_basis='', version=version+1
 		WHERE id=? AND user_id=? AND basis_changed=1`, id, uid)
 	if err != nil {
 		return err
@@ -551,13 +589,16 @@ func (s *Store) ConfirmBasis(uid, id int64) error {
 
 // RecordSoldOut notes that the page says the item is sold out. The last valid
 // price, baseline and alert state are kept and no price is recorded.
-func (s *Store) RecordSoldOut(id int64, next int64) error {
+func (s *Store) RecordSoldOut(id int64, next int64, ver *int64) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	now := s.now()
+	if _, err := guardTx(tx, id, ver); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`UPDATE watches SET status='ok', sold_out=1, last_error='', last_checked_at=?, next_check_at=?, failures=0, failure_notified=0 WHERE id=?`,
 		now, next, id); err != nil {
 		return err
@@ -570,13 +611,16 @@ func (s *Store) RecordSoldOut(id int64, next int64) error {
 
 // RecordNotModified notes a successful conditional GET answered with 304: the
 // page is unchanged, so the last valid observation stands.
-func (s *Store) RecordNotModified(id int64, next int64) error {
+func (s *Store) RecordNotModified(id int64, next int64, ver *int64) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	now := s.now()
+	if _, err := guardTx(tx, id, ver); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`UPDATE watches SET status='ok', last_error='', last_checked_at=?, next_check_at=?, failures=0, failure_notified=0 WHERE id=?`,
 		now, next, id); err != nil {
 		return err
@@ -589,13 +633,20 @@ func (s *Store) RecordNotModified(id int64, next int64) error {
 
 // RecordFailure stores a failed check. status is one of error, blocked, stopped.
 // A non-nil notice is queued and the watch marked as notified, atomically.
-func (s *Store) RecordFailure(id int64, status, reason string, failures int, next int64, notice *QueuedAlert) error {
+func (s *Store) RecordFailure(id int64, status, reason string, failures int, next int64, notice *QueuedAlert, ver *int64) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	now := s.now()
+	alertsOK, err := guardTx(tx, id, ver)
+	if err != nil {
+		return err
+	}
+	if !alertsOK {
+		notice = nil
+	}
 	if _, err := tx.Exec(`UPDATE watches SET status=?, last_error=?, failures=?, last_checked_at=?, next_check_at=? WHERE id=?`,
 		status, reason, failures, now, next, id); err != nil {
 		return err
@@ -649,17 +700,4 @@ func (s *Store) History(uid, watchID int64, limit int) ([]HistoryRow, error) {
 func (s *Store) RecordAlert(watchID int64, kind string, price int64) error {
 	_, err := s.db.Exec(`INSERT INTO alerts_sent(watch_id,kind,price_pence,sent_at) VALUES(?,?,?,?)`, watchID, kind, price, s.now())
 	return err
-}
-
-// LastAlertPrice returns the price of the most recent alert of kind, if any.
-func (s *Store) LastAlertPrice(watchID int64, kind string) (*int64, error) {
-	var p int64
-	err := s.db.QueryRow(`SELECT price_pence FROM alerts_sent WHERE watch_id=? AND kind=? ORDER BY id DESC LIMIT 1`, watchID, kind).Scan(&p)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &p, nil
 }

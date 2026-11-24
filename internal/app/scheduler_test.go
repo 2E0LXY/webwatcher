@@ -140,11 +140,11 @@ func TestSchedulerChangeAndBelowTarget(t *testing.T) {
 	if len(e.m.Sent()) != 3 || !contains(e.m.Sent()[2].Text, "price changed") {
 		t.Fatalf("%+v", e.m.Sent())
 	}
-	// 6: 9500 -> 10500 : changed ; 7: -> 9900 : below, but same price as the last below alert -> suppressed
+	// 6: 9500 -> 10500 : changed ; 7: -> 9900 : crosses back below the target, so it re-arms and alerts again
 	e.run(t, time.Hour)
 	e.run(t, time.Hour)
-	if n := len(e.m.Sent()); n != 4 {
-		t.Fatalf("sent %d, want 4 (below repeat for same price suppressed)", n)
+	if n := len(e.m.Sent()); n != 5 {
+		t.Fatalf("sent %d, want 5 (recovery above target re-arms the below alert, even at an earlier price)", n)
 	}
 	h, _ := e.st.History(e.uid, id, 100)
 	if len(h) != 7 {

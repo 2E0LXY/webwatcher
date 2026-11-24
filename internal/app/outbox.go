@@ -30,11 +30,12 @@ type outboxRow struct {
 	Attempts int
 	Phone    string
 	Allowed  bool
+	Fresh    bool // the watch still exists, is not paused and has not been edited since the alert was queued
 }
 
 func (s *Store) dueOutbox(limit int) ([]outboxRow, error) {
-	rows, err := s.db.Query(`SELECT o.id,o.user_id,o.kind,o.text,o.params,o.attempts,u.phone,(u.alerts_enabled=1 AND u.consent_at IS NOT NULL)
-		FROM outbox o JOIN users u ON u.id=o.user_id
+	rows, err := s.db.Query(`SELECT o.id,o.user_id,o.kind,o.text,o.params,o.attempts,u.phone,(u.alerts_enabled=1 AND u.consent_at IS NOT NULL), (w.paused=0 AND w.version=o.watch_version)
+		FROM outbox o JOIN users u ON u.id=o.user_id JOIN watches w ON w.id=o.watch_id
 		WHERE o.status='queued' AND o.next_attempt_at<=? ORDER BY o.id LIMIT ?`, s.now(), limit)
 	if err != nil {
 		return nil, err
@@ -44,12 +45,12 @@ func (s *Store) dueOutbox(limit int) ([]outboxRow, error) {
 	for rows.Next() {
 		var r outboxRow
 		var params string
-		var allowed int
-		if err := rows.Scan(&r.ID, &r.UserID, &r.Kind, &r.Text, &params, &r.Attempts, &r.Phone, &allowed); err != nil {
+		var allowed, fresh int
+		if err := rows.Scan(&r.ID, &r.UserID, &r.Kind, &r.Text, &params, &r.Attempts, &r.Phone, &allowed, &fresh); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(params), &r.Params)
-		r.Allowed = allowed != 0
+		r.Allowed, r.Fresh = allowed != 0, fresh != 0
 		out = append(out, r)
 	}
 	return out, rows.Err()
@@ -152,6 +153,10 @@ func (s *Sender) RunOnce(ctx context.Context) int {
 		}
 		if !r.Allowed {
 			s.store.finishOutbox(r.ID, OutSuppressed, r.Attempts, 0, "user opted out or has not consented")
+			continue
+		}
+		if !r.Fresh {
+			s.store.finishOutbox(r.ID, OutSuppressed, r.Attempts, 0, "watch was paused or edited after the alert was queued")
 			continue
 		}
 		n, err := s.store.sendsSince(s.clock.Now().Add(-time.Hour).Unix())

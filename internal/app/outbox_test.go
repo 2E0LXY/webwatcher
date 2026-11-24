@@ -265,6 +265,12 @@ func TestNoAlertsWhenDisabledOrNoConsent(t *testing.T) {
 	uid2, _, _ := st2.ConsumeLoginToken("h")
 	wid, _ := st2.AddWatch(Watch{UserID: uid2, URL: "https://x.example.com/", IntervalMin: 60})
 	st2.RecordSuccess(wid, 100, "GBP", "meta", 0, nil, qa(AlertChanged, 100))
+	if n := outboxCount(st2, ``); n != 0 {
+		t.Fatalf("alert queued for a user without consent: %d", n)
+	}
+	// belt and braces: even a row that got in some other way is not sent
+	st2.db.Exec(`INSERT INTO outbox(user_id,watch_id,kind,price_pence,event_key,text,params,next_attempt_at,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+		uid2, wid, "changed", 1, "x", "t", "[]", 0, 0)
 	m := &fakeMessenger{}
 	NewSender(st2, m, newFakeClock(), 10).RunOnce(context.Background())
 	if len(m.Sent()) != 0 {

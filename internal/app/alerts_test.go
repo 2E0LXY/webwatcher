@@ -25,10 +25,6 @@ func TestEvaluateAlert(t *testing.T) {
 		{"already below, falls further", AlertInput{Prev: p(9900), Cur: 9500, Target: p(10000)}, AlertChanged},
 		{"already below, unchanged", AlertInput{Prev: p(9900), Cur: 9900, Target: p(10000)}, ""},
 		{"rise above target", AlertInput{Prev: p(9900), Cur: 10500, Target: p(10000)}, AlertChanged},
-		{"dedupe below same price", AlertInput{Cur: 9000, Target: p(10000), LastBelow: p(9000)}, ""},
-		{"below different price than last below", AlertInput{Prev: p(12000), Cur: 9000, Target: p(10000), LastBelow: p(9500)}, AlertBelow},
-		{"dedupe changed same price", AlertInput{Prev: p(9000), Cur: 10000, LastChanged: p(10000)}, ""},
-		{"below dedupe does not fall through to changed", AlertInput{Prev: p(12000), Cur: 9000, Target: p(10000), LastBelow: p(9000)}, ""},
 	}
 	for _, c := range cases {
 		if got := EvaluateAlert(c.in); got != c.want {

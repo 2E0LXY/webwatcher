@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"math/rand/v2"
 	"net/url"
@@ -131,19 +132,19 @@ func (s *Scheduler) check(ctx context.Context, w *Watch) {
 func (s *Scheduler) onSuccess(ctx context.Context, w *Watch, res *Result) {
 	if res.NotModified {
 		iv := s.interval(w)
-		if err := s.store.RecordNotModified(w.ID, s.clock.Now().Add(iv+s.jitter(iv)).Unix()); err != nil {
+		if err := s.store.RecordNotModified(w.ID, s.clock.Now().Add(iv+s.jitter(iv)).Unix(), &w.Version); err != nil && !errors.Is(err, ErrStale) {
 			slog.Error("record not modified", "watch", w.ID, "host", hostOf(w.URL), "err", RedactPII(err.Error()))
 		}
 		return
 	}
-	obs := Observation{Price: res.PricePence, Currency: res.Currency, Method: res.Method, Basis: res.Basis, ETag: res.ETag, LastModified: res.LastModified}
+	obs := Observation{Price: res.PricePence, Currency: res.Currency, Method: res.Method, Basis: res.Basis, ETag: res.ETag, LastModified: res.LastModified, Version: &w.Version}
 	if obs.Basis == "" {
 		obs.Basis = BasisUnknown
 	}
 	iv := s.interval(w)
 	next := s.clock.Now().Add(iv + s.jitter(iv)).Unix()
 	if res.SoldOut {
-		if err := s.store.RecordSoldOut(w.ID, next); err != nil {
+		if err := s.store.RecordSoldOut(w.ID, next, &w.Version); err != nil && !errors.Is(err, ErrStale) {
 			slog.Error("record sold out", "watch", w.ID, "host", hostOf(w.URL), "err", RedactPII(err.Error()))
 		}
 		return
@@ -151,21 +152,19 @@ func (s *Scheduler) onSuccess(ctx context.Context, w *Watch, res *Result) {
 	// Never compare unlike things: a different currency or price basis is
 	// recorded and flagged for the user to confirm, with no alert.
 	if w.LastPricePence != nil && (w.Currency != obs.Currency || w.Basis != obs.Basis) {
-		if err := s.store.RecordBasisChange(w.ID, obs, next); err != nil {
+		if err := s.store.RecordBasisChange(w.ID, obs, next); err != nil && !errors.Is(err, ErrStale) {
 			slog.Error("record basis change", "watch", w.ID, "host", hostOf(w.URL), "err", RedactPII(err.Error()))
 		}
 		return
 	}
-	lastChanged, _ := s.store.LastAlertPrice(w.ID, AlertChanged)
-	lastBelow, _ := s.store.LastAlertPrice(w.ID, AlertBelow)
-	kind := EvaluateAlert(AlertInput{Prev: w.AlertBase, Cur: res.PricePence, Target: w.TargetPence, LastChanged: lastChanged, LastBelow: lastBelow})
+	kind := EvaluateAlert(AlertInput{Prev: w.AlertBase, Cur: res.PricePence, Target: w.TargetPence})
 	w.Currency = res.Currency
 	var qa *QueuedAlert
 	if kind != "" && w.AlertsOn {
 		qa = &QueuedAlert{Kind: kind, Price: res.PricePence, Msg: BuildAlertMessage(kind, w, w.AlertBase, res.PricePence, "", s.baseURL)}
 	}
 	// The price update and its alert are committed together; the sender loop delivers it.
-	if err := s.store.RecordObservation(w.ID, obs, next, &res.PricePence, qa); err != nil {
+	if err := s.store.RecordObservation(w.ID, obs, next, &res.PricePence, qa); err != nil && !errors.Is(err, ErrStale) {
 		slog.Error("record success", "watch", w.ID, "host", hostOf(w.URL), "err", RedactPII(err.Error()))
 	}
 }
@@ -199,7 +198,7 @@ func (s *Scheduler) onFailure(ctx context.Context, w *Watch, fail *CheckFailure)
 	if failures >= MaxFailures && !w.FailureNotif && w.AlertsOn {
 		notice = &QueuedAlert{Kind: AlertFailed, Msg: BuildAlertMessage(AlertFailed, w, nil, 0, fail.Reason, s.baseURL)}
 	}
-	if err := s.store.RecordFailure(w.ID, fail.Status, fail.Reason, failures, next, notice); err != nil {
+	if err := s.store.RecordFailure(w.ID, fail.Status, fail.Reason, failures, next, notice, &w.Version); err != nil && !errors.Is(err, ErrStale) {
 		slog.Error("record failure", "watch", w.ID, "host", hostOf(w.URL), "err", RedactPII(err.Error()))
 	}
 }

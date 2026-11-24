@@ -300,12 +300,12 @@ func TestDashboardDistinguishesStatuses(t *testing.T) {
 	csrf := b.login("07700900123")
 	b.do("POST", "/watches", url.Values{"csrf": {csrf}, "url": {"https://a.example.com/x"}})
 	e.st.RecordObservation(1, Observation{Price: 5000, Currency: "GBP", Method: "meta", Basis: BasisUnknown}, 0, nil, nil)
-	e.st.RecordFailure(1, "noprice", "no price found", 1, 0, nil)
+	e.st.RecordFailure(1, "noprice", "no price found", 1, 0, nil, nil)
 	page := b.do("GET", "/", nil).Body.String()
 	if !strings.Contains(page, "No price found") || !strings.Contains(page, "Last valid price kept") || !strings.Contains(page, "£50.00") {
 		t.Fatal("noprice not shown")
 	}
-	e.st.RecordFailure(1, "error", "site returned HTTP 502", 1, 0, nil)
+	e.st.RecordFailure(1, "error", "site returned HTTP 502", 1, 0, nil, nil)
 	if !strings.Contains(b.do("GET", "/", nil).Body.String(), "Temporary error") {
 		t.Fatal("transient not shown")
 	}

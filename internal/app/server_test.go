@@ -390,7 +390,7 @@ func TestDashboardShowsBlockedNotice(t *testing.T) {
 	b := e.browser()
 	csrf := b.login("07700900123")
 	b.do("POST", "/watches", url.Values{"csrf": {csrf}, "url": {"https://www.jet2.com/x"}})
-	e.st.RecordFailure(1, "blocked", "blocked by site (HTTP 403)", 1, e.clk.Now().Unix()+3600, nil)
+	e.st.RecordFailure(1, "blocked", "blocked by site (HTTP 403)", 1, e.clk.Now().Unix()+3600, nil, nil)
 	page := b.do("GET", "/", nil).Body.String()
 	for _, s := range []string{"Blocked by site", "blocking automated checks", "does not try to get round bot protection", "blocked by site (HTTP 403)"} {
 		if !strings.Contains(page, s) {
