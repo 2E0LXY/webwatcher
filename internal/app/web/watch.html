@@ -13,6 +13,8 @@
   <dt>Check every</dt><dd>{{.Interval}}</dd>
   {{if .Selector}}<dt>CSS selector</dt><dd><code>{{.Selector}}</code></dd>{{end}}
 </dl>
+{{if .BasisChanged}}<p class="error">{{.BasisNote}}</p>
+<form method="post" action="/watches/{{.ID}}/confirm-basis" class="inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button type="submit">Confirm new basis and reset baseline</button></form>{{end}}
 {{if eq .Status "blocked"}}<p class="error">This site is blocking automated checks. Webwatcher does not try to get round bot protection, so this page cannot be watched for now.</p>{{end}}
 
 <section class="card">

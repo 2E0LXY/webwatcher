@@ -144,7 +144,7 @@ func TestSchedulerChangeAndBelowTarget(t *testing.T) {
 	if n := len(e.m.Sent()); n != 4 {
 		t.Fatalf("sent %d, want 4 (below repeat for same price suppressed)", n)
 	}
-	h, _ := e.st.History(id, 100)
+	h, _ := e.st.History(e.uid, id, 100)
 	if len(h) != 7 {
 		t.Fatalf("history %d", len(h))
 	}

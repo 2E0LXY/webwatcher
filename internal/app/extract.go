@@ -15,6 +15,39 @@ type Result struct {
 	PricePence int64
 	Currency   string
 	Method     string // selector, jsonld, meta, regex
+	Basis      string // BasisPerPerson, BasisTotal or BasisUnknown
+	SoldOut    bool   // the page says the item is out of stock (JSON-LD availability)
+}
+
+// Price bases. A price per person and a price for the whole party must never
+// be compared with each other.
+const (
+	BasisPerPerson = "per_person"
+	BasisTotal     = "total"
+	BasisUnknown   = "unknown"
+)
+
+var (
+	basisPPRe    = regexp.MustCompile(`(?i)(\bper\s+(person|adult|traveller|traveler|passenger|guest|head)\b|\bpp\b|\bp\.p\.|\ba\s+head\b)`)
+	basisTotalRe = regexp.MustCompile(`(?i)(\btotal\b|\bin\s+total\b|\bfor\s+(all\s+)?\d+\s+(adults?|people|persons|passengers|guests|travellers|travelers)\b|\bfor\s+the\s+(whole\s+)?(party|group)\b)`)
+)
+
+// basisFromText detects "per person" or "total" wording. The earliest
+// indication wins; if neither appears the basis is unknown.
+func basisFromText(s string) string {
+	pp, tot := basisPPRe.FindStringIndex(s), basisTotalRe.FindStringIndex(s)
+	switch {
+	case pp != nil && tot != nil:
+		if pp[0] < tot[0] {
+			return BasisPerPerson
+		}
+		return BasisTotal
+	case pp != nil:
+		return BasisPerPerson
+	case tot != nil:
+		return BasisTotal
+	}
+	return BasisUnknown
 }
 
 // ExtractError carries a user-facing reason for failure.
@@ -49,7 +82,9 @@ func parseAmount(s string) (int64, bool) {
 			decAt = comma
 		}
 	case dot >= 0:
-		if strings.Count(t, ".") == 1 {
+		// "1.299" is one thousand two hundred and ninety-nine in European
+		// notation; "0.999" and "1299.999" are decimals.
+		if strings.Count(t, ".") == 1 && !(len(t)-dot-1 == 3 && dot >= 1 && dot <= 3 && t[:dot] != "0") {
 			decAt = dot
 		}
 	}
@@ -102,17 +137,50 @@ func currencyFromSymbol(s string) string {
 	return ""
 }
 
+const amountPat = `\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?`
+
 var (
-	symMoneyRe  = regexp.MustCompile(`([£€$])\s?(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{1,2}))?`)
-	bareMoneyRe = regexp.MustCompile(`\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?`)
+	prefixMoneyRe = regexp.MustCompile(`([£€$])\s?(` + amountPat + `)`)
+	suffixMoneyRe = regexp.MustCompile(`(` + amountPat + `)\s?(€|£|EUR|GBP|USD)`)
+	bareMoneyRe   = regexp.MustCompile(amountPat)
 )
+
+type moneyMatch struct {
+	start, end int
+	pence      int64
+	cur        string
+}
+
+// findMoneyAll returns every amount with a currency symbol or code in text,
+// in document order. Prefix (£12.50, €1.299,50) and suffix (12,50 €) forms.
+func findMoneyAll(text string) []moneyMatch {
+	var out []moneyMatch
+	for _, m := range prefixMoneyRe.FindAllStringSubmatchIndex(text, -1) {
+		if p, ok := parseAmount(text[m[4]:m[5]]); ok {
+			out = append(out, moneyMatch{m[0], m[1], p, currencyFromSymbol(text[m[2]:m[3]])})
+		}
+	}
+	for _, m := range suffixMoneyRe.FindAllStringSubmatchIndex(text, -1) {
+		if p, ok := parseAmount(text[m[2]:m[3]]); ok {
+			out = append(out, moneyMatch{m[0], m[1], p, currencyFromSymbol(text[m[4]:m[5]])})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].start < out[j].start })
+	// drop overlaps (a suffix match can swallow the tail of a prefix match)
+	var clean []moneyMatch
+	for _, m := range out {
+		if len(clean) > 0 && m.start < clean[len(clean)-1].end {
+			continue
+		}
+		clean = append(clean, m)
+	}
+	return clean
+}
 
 // findMoney returns the first amount in text, preferring ones with a currency symbol.
 func findMoney(text string) (int64, string, bool) {
-	if m := symMoneyRe.FindStringSubmatch(text); m != nil {
-		if p, ok := parseAmount(m[2] + "." + m[3]); ok {
-			return p, currencyFromSymbol(m[1]), true
-		}
+	if ms := findMoneyAll(text); len(ms) > 0 {
+		return ms[0].pence, ms[0].cur, true
 	}
 	if m := bareMoneyRe.FindString(text); m != "" {
 		if p, ok := parseAmount(m); ok {
@@ -166,12 +234,12 @@ func extractSelector(doc *html.Node, selector string) (*Result, error) {
 				if c := attrVal(n, "data-currency"); c != "" {
 					cur = currencyFromSymbol(c)
 				}
-				return &Result{p, cur, "selector"}, nil
+				return &Result{PricePence: p, Currency: cur, Method: "selector", Basis: basisFromText(nodeText(n))}, nil
 			}
 		}
 	}
 	if p, cur, ok := findMoney(nodeText(n)); ok {
-		return &Result{p, cur, "selector"}, nil
+		return &Result{PricePence: p, Currency: cur, Method: "selector", Basis: basisFromText(nodeText(n))}, nil
 	}
 	return nil, &ExtractError{Reason: "selector matched but its text holds no price"}
 }
@@ -208,6 +276,17 @@ func anyToString(v any) string {
 	return ""
 }
 
+type ldOffer struct {
+	pence   int64
+	cur     string
+	basis   string
+	soldOut bool
+}
+
+var listPriceRe = regexp.MustCompile(`(?i)(listprice|strikethrough|srp|msrp|was)`)
+
+// offerPrice reads the price of one Offer, preferring a sale price over a
+// list ("was") price when price specifications are given.
 func offerPrice(m map[string]any) (int64, string, bool) {
 	keys := []string{"price", "lowPrice"}
 	if hasType(m, "AggregateOffer") {
@@ -232,38 +311,118 @@ func offerPrice(m map[string]any) (int64, string, bool) {
 	if p, c, ok := try(m); ok {
 		return p, c, true
 	}
+	var specs []map[string]any
 	switch ps := m["priceSpecification"].(type) {
 	case map[string]any:
-		return try(ps)
+		specs = []map[string]any{ps}
 	case []any:
 		for _, x := range ps {
 			if mm, ok := x.(map[string]any); ok {
-				if p, c, ok := try(mm); ok {
-					return p, c, true
-				}
+				specs = append(specs, mm)
+			}
+		}
+	}
+	for pass := 0; pass < 2; pass++ {
+		for _, sp := range specs {
+			isList := listPriceRe.MatchString(anyToString(sp["priceType"]))
+			if (pass == 0) == isList {
+				continue // pass 0 takes sale prices, pass 1 falls back to list prices
+			}
+			if p, c, ok := try(sp); ok {
+				return p, c, true
 			}
 		}
 	}
 	return 0, "", false
 }
 
-func walkLD(v any) (int64, string, bool) {
+// offerText gathers the wording that may say what the price is per.
+func offerText(m map[string]any) string {
+	var parts []string
+	var add func(mm map[string]any, depth int)
+	add = func(mm map[string]any, depth int) {
+		for _, k := range []string{"unitText", "name", "description", "priceType"} {
+			if v := anyToString(mm[k]); v != "" {
+				parts = append(parts, v)
+			}
+		}
+		if depth > 0 {
+			return
+		}
+		if rq, ok := mm["referenceQuantity"].(map[string]any); ok {
+			add(rq, 1)
+		}
+		switch ps := mm["priceSpecification"].(type) {
+		case map[string]any:
+			add(ps, 1)
+		case []any:
+			for _, x := range ps {
+				if sp, ok := x.(map[string]any); ok {
+					add(sp, 1)
+				}
+			}
+		}
+	}
+	add(m, 0)
+	return strings.Join(parts, " ")
+}
+
+func soldOutText(v any) bool {
+	l := strings.ToLower(anyToString(v))
+	return strings.Contains(l, "outofstock") || strings.Contains(l, "soldout") || strings.Contains(l, "discontinued")
+}
+
+func offerFromMap(m map[string]any) (ldOffer, bool) {
+	p, c, ok := offerPrice(m)
+	if !ok {
+		return ldOffer{}, false
+	}
+	return ldOffer{p, c, basisFromText(offerText(m)), soldOutText(m["availability"])}, true
+}
+
+// offerList collects every offer held in the value of an "offers" key.
+func offerList(v any) []ldOffer {
+	var out []ldOffer
 	switch x := v.(type) {
 	case []any:
 		for _, e := range x {
-			if p, c, ok := walkLD(e); ok {
-				return p, c, true
+			out = append(out, offerList(e)...)
+		}
+	case map[string]any:
+		if hasType(x, "AggregateOffer") {
+			if sub := offerList(x["offers"]); len(sub) > 0 {
+				return sub
+			}
+		}
+		if o, ok := offerFromMap(x); ok {
+			return []ldOffer{o}
+		}
+		if sub := offerList(x["offers"]); len(sub) > 0 {
+			return sub
+		}
+	}
+	return out
+}
+
+// ldOffers finds the offers of the first product-like node in the JSON-LD.
+// Offers of related products further along are not mixed in.
+func ldOffers(v any) []ldOffer {
+	switch x := v.(type) {
+	case []any:
+		for _, e := range x {
+			if o := ldOffers(e); len(o) > 0 {
+				return o
 			}
 		}
 	case map[string]any:
 		if hasType(x, "Offer", "AggregateOffer") {
-			if p, c, ok := offerPrice(x); ok {
-				return p, c, true
+			if o := offerList(x); len(o) > 0 {
+				return o
 			}
 		}
 		if o, ok := x["offers"]; ok {
-			if p, c, ok := walkLD(o); ok {
-				return p, c, true
+			if l := offerList(o); len(l) > 0 {
+				return l
 			}
 		}
 		keys := make([]string, 0, len(x))
@@ -276,13 +435,37 @@ func walkLD(v any) (int64, string, bool) {
 		for _, k := range keys {
 			switch x[k].(type) {
 			case map[string]any, []any:
-				if p, c, ok := walkLD(x[k]); ok {
-					return p, c, true
+				if l := ldOffers(x[k]); len(l) > 0 {
+					return l
 				}
 			}
 		}
 	}
-	return 0, "", false
+	return nil
+}
+
+// pickOffer chooses the lowest price among in-stock offers that share the
+// first in-stock offer's currency. If every offer is sold out it reports that,
+// with the first offer's price for information.
+func pickOffer(offers []ldOffer) (ldOffer, bool) {
+	var best *ldOffer
+	for i := range offers {
+		o := offers[i]
+		if o.soldOut {
+			continue
+		}
+		if best == nil {
+			best = &o
+			continue
+		}
+		if o.cur == best.cur && o.pence < best.pence {
+			best = &o
+		}
+	}
+	if best == nil {
+		return offers[0], true
+	}
+	return *best, false
 }
 
 func extractJSONLD(doc *html.Node) *Result {
@@ -297,9 +480,12 @@ func extractJSONLD(doc *html.Node) *Result {
 			dec := json.NewDecoder(strings.NewReader(n.FirstChild.Data))
 			dec.UseNumber()
 			var v any
+			// Malformed JSON-LD is skipped, not fatal: later blocks and the
+			// other extraction methods still get their turn.
 			if dec.Decode(&v) == nil {
-				if p, c, ok := walkLD(v); ok {
-					res = &Result{p, c, "jsonld"}
+				if offers := ldOffers(v); len(offers) > 0 {
+					o, sold := pickOffer(offers)
+					res = &Result{PricePence: o.pence, Currency: o.cur, Method: "jsonld", Basis: o.basis, SoldOut: sold}
 					return
 				}
 			}
@@ -362,7 +548,7 @@ func extractMeta(doc *html.Node) *Result {
 			if cur == "" {
 				cur = "GBP"
 			}
-			return &Result{p, cur, "meta"}
+			return &Result{PricePence: p, Currency: cur, Method: "meta", Basis: BasisUnknown}
 		}
 	}
 	return nil
@@ -378,21 +564,55 @@ func firstNonEmpty(a ...string) string {
 }
 
 var (
-	gbpRe       = regexp.MustCompile(`£\s?(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{2}))?`)
-	goodPreRe   = regexp.MustCompile(`(?i)\b(from|now|only|total|price|pp|per person|per adult|each)\b`)
-	badPreRe    = regexp.MustCompile(`(?i)\b(was|save|saving|deposit|off|worth|rrp|fee|per month|a month|delivery|postage|shipping|reduced by|discount)\b|/mo\b`)
+	goodKwRe    = regexp.MustCompile(`(?i)\b(from|now|only|total|price|pp|per person|per adult|each)\b`)
+	badKwRe     = regexp.MustCompile(`(?i)\b(was|save|saving|deposit|off|worth|rrp|fee|per month|a month|delivery|postage|shipping|reduced by|discount)\b|/mo\b`)
 	badAnchorRe = regexp.MustCompile(`(?i)\b(was|old|strike|original|rrp|deposit|saving|save)\b`)
 )
 
 type candidate struct {
 	pence int64
+	cur   string
+	basis string
 	score int
 }
 
-// extractRegex scans visible text for £ amounts and scores them: "from/now/total"
-// wording, price-like class names and headings score up; "was/save/deposit"
-// wording and struck-through text score down. Highest score wins; ties go to
-// the earliest in the document.
+// preScore looks at the words just before an amount. The nearest keyword
+// decides, so "Was £899 Now £799" scores 899 down and 799 up.
+func preScore(pre string) int {
+	gi, bi := goodKwRe.FindAllStringIndex(pre, -1), badKwRe.FindAllStringIndex(pre, -1)
+	lg, lb := -1, -1
+	if len(gi) > 0 {
+		lg = gi[len(gi)-1][0]
+	}
+	if len(bi) > 0 {
+		lb = bi[len(bi)-1][0]
+	}
+	switch {
+	case lg < 0 && lb < 0:
+		return 0
+	case lb > lg:
+		return -4
+	}
+	return 3
+}
+
+// postScore looks at the words just after an amount. A "was" that introduces
+// another amount ("Now £799 (was £899)") describes that amount, not this one.
+func postScore(post string) int {
+	score := 0
+	if goodKwRe.MatchString(post) {
+		score += 3
+	}
+	if loc := badKwRe.FindStringIndex(post); loc != nil && len(findMoneyAll(post[loc[1]:])) == 0 {
+		score -= 4
+	}
+	return score
+}
+
+// extractRegex scans visible text for amounts with a currency symbol and
+// scores them: "from/now/total" wording, price-like class names and headings
+// score up; "was/save/deposit" wording and struck-through text score down.
+// Highest score wins; ties go to the earliest in the document.
 func extractRegex(doc *html.Node) *Result {
 	var cands []candidate
 	tail := "" // last characters of visible text before the current node
@@ -418,41 +638,30 @@ func extractRegex(doc *html.Node) *Result {
 		if n.Type == html.TextNode {
 			text := strings.Join(strings.Fields(n.Data), " ")
 			if text != "" {
-				for _, m := range gbpRe.FindAllStringSubmatchIndex(text, -1) {
-					p, ok := parseAmount(text[m[2]:m[3]] + "." + func() string {
-						if m[4] >= 0 {
-							return text[m[4]:m[5]]
-						}
-						return "00"
-					}())
-					if !ok {
-						continue
-					}
-					pre := tail + " " + text[:m[0]]
+				for _, m := range findMoneyAll(text) {
+					pre := tail + " " + text[:m.start]
 					if len(pre) > 40 {
 						pre = pre[len(pre)-40:]
 					}
-					post := text[m[1]:]
+					post := text[m.end:]
 					if len(post) > 25 {
 						post = post[:25]
 					}
-					score := 0
-					if goodPreRe.MatchString(pre) || goodPreRe.MatchString(post) {
-						score += 3
-					}
+					score := preScore(pre) + postScore(post)
 					if priceCtx {
 						score += 2
 					}
 					if headCtx {
 						score++
 					}
-					if badPreRe.MatchString(pre) || badPreRe.MatchString(post) {
-						score -= 4
-					}
 					if struckCtx {
 						score -= 4
 					}
-					cands = append(cands, candidate{p, score})
+					basis := basisFromText(post)
+					if basis == BasisUnknown {
+						basis = basisFromText(pre[max(0, len(pre)-25):])
+					}
+					cands = append(cands, candidate{m.pence, m.cur, basis, score})
 				}
 				tail += " " + text
 				if len(tail) > 80 {
@@ -474,7 +683,7 @@ func extractRegex(doc *html.Node) *Result {
 			best = c
 		}
 	}
-	return &Result{best.pence, "GBP", "regex"}
+	return &Result{PricePence: best.pence, Currency: best.cur, Method: "regex", Basis: best.basis}
 }
 
 // looksBrowserRendered guesses that a page is an empty JS application shell.

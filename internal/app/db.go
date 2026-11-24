@@ -105,6 +105,13 @@ var migrations = []string{
 	CREATE INDEX outbox_user ON outbox(user_id);
 	CREATE TABLE send_log (at INTEGER NOT NULL);
 	CREATE INDEX send_log_at ON send_log(at);`,
+	`ALTER TABLE watches ADD COLUMN basis TEXT NOT NULL DEFAULT 'unknown';
+	ALTER TABLE watches ADD COLUMN basis_changed INTEGER NOT NULL DEFAULT 0;
+	ALTER TABLE watches ADD COLUMN obs_price_pence INTEGER;
+	ALTER TABLE watches ADD COLUMN obs_currency TEXT NOT NULL DEFAULT '';
+	ALTER TABLE watches ADD COLUMN obs_basis TEXT NOT NULL DEFAULT '';
+	ALTER TABLE price_history ADD COLUMN basis TEXT NOT NULL DEFAULT 'unknown';
+	ALTER TABLE watches ADD COLUMN sold_out INTEGER NOT NULL DEFAULT 0;`,
 }
 
 // OpenDB opens (creating if needed) the SQLite database in dir and migrates it.

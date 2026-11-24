@@ -80,6 +80,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /watches/{id}/pause", s.withSession(s.handlePause(true)))
 	mux.HandleFunc("POST /watches/{id}/resume", s.withSession(s.handlePause(false)))
 	mux.HandleFunc("POST /watches/{id}/delete", s.withSession(s.handleDeleteWatch))
+	mux.HandleFunc("POST /watches/{id}/confirm-basis", s.withSession(s.handleConfirmBasis))
 	mux.HandleFunc("GET /account", s.withSession(s.handleAccount))
 	mux.HandleFunc("POST /account/delete", s.withSession(s.handleDeleteAccount))
 	mux.HandleFunc("POST /account/alerts", s.withSession(s.handleToggleAlerts))
@@ -262,23 +263,26 @@ type intervalOpt struct {
 }
 
 type watchView struct {
-	ID        int64
-	Title     string
-	URL       string
-	Host      string
-	Price     string
-	Checked   string
-	Status    string // css class: ok, pending, blocked, error, paused, stopped
-	StatusTxt string
-	Reason    string
-	Target    string
-	TargetVal string
-	Method    string
-	Interval  string
-	Paused    bool
-	Stopped   bool
-	Selector  string
-	Failures  int
+	ID           int64
+	Title        string
+	URL          string
+	Host         string
+	Price        string
+	Checked      string
+	Status       string // css class: ok, pending, blocked, error, paused, stopped
+	StatusTxt    string
+	Reason       string
+	Target       string
+	TargetVal    string
+	Method       string
+	Interval     string
+	Paused       bool
+	Stopped      bool
+	Selector     string
+	Failures     int
+	SoldOut      bool
+	BasisChanged bool
+	BasisNote    string
 }
 
 type histView struct{ Price, When, Method string }
@@ -338,7 +342,7 @@ func (s *Server) message(w http.ResponseWriter, r *http.Request, status int, hea
 
 var flashes = map[string]string{
 	"added": "Watch added. The first check happens within a minute or so.", "deleted": "Watch deleted.",
-	"saved": "Changes saved.", "alerts_on": "WhatsApp alerts are on.", "alerts_off": "WhatsApp alerts are off. You will get no more alert messages.", "paused": "Watch paused.", "resumed": "Watch resumed.",
+	"saved": "Changes saved.", "confirmed": "New price basis confirmed. The baseline has been reset.", "alerts_on": "WhatsApp alerts are on.", "alerts_off": "WhatsApp alerts are off. You will get no more alert messages.", "paused": "Watch paused.", "resumed": "Watch resumed.",
 }
 
 func intervalLabel(m int) string {
@@ -359,6 +363,16 @@ func intervalOpts(sel int) []intervalOpt {
 		out = append(out, intervalOpt{m, intervalLabel(m), m == sel})
 	}
 	return out
+}
+
+func basisSuffix(b string) string {
+	switch b {
+	case BasisPerPerson:
+		return " per person"
+	case BasisTotal:
+		return " total"
+	}
+	return ""
 }
 
 func (s *Server) view(w *Watch) watchView {
@@ -382,11 +396,24 @@ func (s *Server) view(w *Watch) watchView {
 		v.Checked = time.Unix(*w.LastCheckedAt, 0).In(london).Format("2 Jan 2006, 15:04")
 	}
 	v.Stopped = w.Failures >= MaxFailures
+	v.SoldOut = w.SoldOut
+	if w.LastPricePence != nil {
+		v.Price += basisSuffix(w.Basis)
+	}
+	if w.BasisChanged && w.ObsPence != nil {
+		v.BasisChanged = true
+		v.BasisNote = fmt.Sprintf("Basis changed: the page now shows %s%s, but the last price you were tracking was %s%s. These cannot be compared, so no alert was sent. If the new figure is the one you want, confirm it to reset the baseline.",
+			FormatPence(*w.ObsPence, w.ObsCurrency), basisSuffix(w.ObsBasis), FormatPence(*w.LastPricePence, w.Currency), basisSuffix(w.Basis))
+	}
 	switch {
 	case w.Paused:
 		v.Status, v.StatusTxt = "paused", "Paused"
 	case v.Stopped:
 		v.Status, v.StatusTxt = "stopped", "Stopped after 10 failed checks"
+	case w.BasisChanged:
+		v.Status, v.StatusTxt = "error", "Basis changed"
+	case w.SoldOut:
+		v.Status, v.StatusTxt = "paused", "Sold out"
 	case w.Status == "blocked":
 		v.Status, v.StatusTxt = "blocked", "Blocked by site"
 	case w.Status == "error":
@@ -599,11 +626,11 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request, sess *Sessi
 
 func (s *Server) renderWatch(w http.ResponseWriter, status int, sess *Session, wt *Watch, errMsg, flash string) {
 	v := s.view(wt)
-	hist, _ := s.store.History(wt.ID, 100)
+	hist, _ := s.store.History(wt.UserID, wt.ID, 100)
 	d := pageData{Title: v.Title, Phone: sess.Phone, CSRF: sess.CSRF, LoggedIn: true, W: &v, Error: errMsg, Flash: flash,
 		Intervals: intervalOpts(wt.IntervalMin)}
 	for _, h := range hist {
-		d.History = append(d.History, histView{FormatPence(h.PricePence, h.Currency), time.Unix(h.CheckedAt, 0).In(london).Format("2 Jan 2006, 15:04"), h.Method})
+		d.History = append(d.History, histView{FormatPence(h.PricePence, h.Currency) + basisSuffix(h.Basis), time.Unix(h.CheckedAt, 0).In(london).Format("2 Jan 2006, 15:04"), h.Method})
 	}
 	s.render(w, status, "watch", d)
 }
@@ -656,6 +683,22 @@ func (s *Server) handlePause(pause bool) sessHandler {
 		}
 		http.Redirect(w, r, dest, http.StatusSeeOther)
 	}
+}
+
+func (s *Server) handleConfirmBasis(w http.ResponseWriter, r *http.Request, sess *Session) {
+	wt, ok := s.watchFromPath(w, r, sess)
+	if !ok {
+		return
+	}
+	if err := s.store.ConfirmBasis(sess.UserID, wt.ID); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			http.Redirect(w, r, fmt.Sprintf("/watches/%d", wt.ID), http.StatusSeeOther)
+			return
+		}
+		s.message(w, r, 500, "Error", "Could not save.")
+		return
+	}
+	http.Redirect(w, r, fmt.Sprintf("/watches/%d?m=confirmed", wt.ID), http.StatusSeeOther)
 }
 
 func (s *Server) handleDeleteWatch(w http.ResponseWriter, r *http.Request, sess *Session) {

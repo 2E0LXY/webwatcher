@@ -125,6 +125,26 @@ func (s *Scheduler) check(ctx context.Context, w *Watch) {
 }
 
 func (s *Scheduler) onSuccess(ctx context.Context, w *Watch, res *Result) {
+	obs := Observation{Price: res.PricePence, Currency: res.Currency, Method: res.Method, Basis: res.Basis}
+	if obs.Basis == "" {
+		obs.Basis = BasisUnknown
+	}
+	iv := s.interval(w)
+	next := s.clock.Now().Add(iv + s.jitter(iv)).Unix()
+	if res.SoldOut {
+		if err := s.store.RecordSoldOut(w.ID, next); err != nil {
+			slog.Error("record sold out", "watch", w.ID, "host", hostOf(w.URL), "err", err)
+		}
+		return
+	}
+	// Never compare unlike things: a different currency or price basis is
+	// recorded and flagged for the user to confirm, with no alert.
+	if w.LastPricePence != nil && (w.Currency != obs.Currency || w.Basis != obs.Basis) {
+		if err := s.store.RecordBasisChange(w.ID, obs, next); err != nil {
+			slog.Error("record basis change", "watch", w.ID, "host", hostOf(w.URL), "err", err)
+		}
+		return
+	}
 	lastChanged, _ := s.store.LastAlertPrice(w.ID, AlertChanged)
 	lastBelow, _ := s.store.LastAlertPrice(w.ID, AlertBelow)
 	kind := EvaluateAlert(AlertInput{Prev: w.AlertBase, Cur: res.PricePence, Target: w.TargetPence, LastChanged: lastChanged, LastBelow: lastBelow})
@@ -133,10 +153,8 @@ func (s *Scheduler) onSuccess(ctx context.Context, w *Watch, res *Result) {
 	if kind != "" && w.AlertsOn {
 		qa = &QueuedAlert{Kind: kind, Price: res.PricePence, Msg: BuildAlertMessage(kind, w, w.AlertBase, res.PricePence, "", s.baseURL)}
 	}
-	iv := s.interval(w)
-	next := s.clock.Now().Add(iv + s.jitter(iv)).Unix()
 	// The price update and its alert are committed together; the sender loop delivers it.
-	if err := s.store.RecordSuccess(w.ID, res.PricePence, res.Currency, res.Method, next, &res.PricePence, qa); err != nil {
+	if err := s.store.RecordObservation(w.ID, obs, next, &res.PricePence, qa); err != nil {
 		slog.Error("record success", "watch", w.ID, "host", hostOf(w.URL), "err", err)
 	}
 }

@@ -246,21 +246,29 @@ type Watch struct {
 	CreatedAt      int64
 	Phone          string // joined from users; set by DueWatches/WatchByID
 	AlertsOn       bool   // user has consented and not opted out
+	Basis          string // per_person, total or unknown: what LastPricePence is a price of
+	BasisChanged   bool   // a later observation had a different currency or basis; awaiting confirmation
+	ObsPence       *int64 // that observation
+	ObsCurrency    string
+	ObsBasis       string
+	SoldOut        bool
 }
 
 const watchCols = `w.id,w.user_id,w.url,w.label,w.selector,w.target_pence,w.interval_min,w.paused,w.status,
 	w.last_price_pence,w.alert_base_pence,w.currency,w.last_method,w.last_error,w.last_checked_at,
-	w.next_check_at,w.failures,w.failure_notified,w.created_at,u.phone,(u.alerts_enabled=1 AND u.consent_at IS NOT NULL)`
+	w.next_check_at,w.failures,w.failure_notified,w.created_at,u.phone,(u.alerts_enabled=1 AND u.consent_at IS NOT NULL),
+	w.basis,w.basis_changed,w.obs_price_pence,w.obs_currency,w.obs_basis,w.sold_out`
 
 type rowScanner interface{ Scan(...any) error }
 
 func scanWatch(r rowScanner) (*Watch, error) {
 	var w Watch
-	var paused, fn, ao int
+	var paused, fn, ao, bc, so int
 	err := r.Scan(&w.ID, &w.UserID, &w.URL, &w.Label, &w.Selector, &w.TargetPence, &w.IntervalMin, &paused, &w.Status,
 		&w.LastPricePence, &w.AlertBase, &w.Currency, &w.LastMethod, &w.LastError, &w.LastCheckedAt,
-		&w.NextCheckAt, &w.Failures, &fn, &w.CreatedAt, &w.Phone, &ao)
-	w.Paused, w.FailureNotif, w.AlertsOn = paused != 0, fn != 0, ao != 0
+		&w.NextCheckAt, &w.Failures, &fn, &w.CreatedAt, &w.Phone, &ao,
+		&w.Basis, &bc, &w.ObsPence, &w.ObsCurrency, &w.ObsBasis, &so)
+	w.Paused, w.FailureNotif, w.AlertsOn, w.BasisChanged, w.SoldOut = paused != 0, fn != 0, ao != 0, bc != 0, so != 0
 	return &w, err
 }
 
@@ -416,19 +424,34 @@ func enqueueTx(tx *sql.Tx, watchID int64, a *QueuedAlert, now int64) error {
 // RecordSuccess stores a successful check, trims history, resets failures and,
 // if alert is non-nil, queues it in the outbox, all in one transaction.
 func (s *Store) RecordSuccess(id int64, price int64, cur, method string, next int64, base *int64, alert *QueuedAlert) error {
+	return s.RecordObservation(id, Observation{Price: price, Currency: cur, Method: method, Basis: BasisUnknown}, next, base, alert)
+}
+
+// Observation is one extracted price with what it is a price of.
+type Observation struct {
+	Price    int64
+	Currency string
+	Method   string
+	Basis    string
+}
+
+// RecordObservation is RecordSuccess for a comparable observation.
+func (s *Store) RecordObservation(id int64, o Observation, next int64, base *int64, alert *QueuedAlert) error {
+	price, cur, method := o.Price, o.Currency, o.Method
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	now := s.now()
-	if _, err := tx.Exec(`UPDATE watches SET status='ok', last_price_pence=?, currency=?, last_method=?, last_error='',
-		last_checked_at=?, next_check_at=?, failures=0, failure_notified=0, alert_base_pence=? WHERE id=?`,
-		price, cur, method, now, next, base, id); err != nil {
+	if _, err := tx.Exec(`UPDATE watches SET status='ok', last_price_pence=?, currency=?, basis=?, last_method=?, last_error='',
+		last_checked_at=?, next_check_at=?, failures=0, failure_notified=0, alert_base_pence=?, sold_out=0,
+		basis_changed=0, obs_price_pence=NULL, obs_currency='', obs_basis='' WHERE id=?`,
+		price, cur, o.Basis, method, now, next, base, id); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`INSERT INTO price_history(watch_id, price_pence, currency, method, checked_at) VALUES(?,?,?,?,?)`,
-		id, price, cur, method, now); err != nil {
+	if _, err := tx.Exec(`INSERT INTO price_history(watch_id, price_pence, currency, basis, method, checked_at) VALUES(?,?,?,?,?,?)`,
+		id, price, cur, o.Basis, method, now); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM price_history WHERE watch_id=? AND id NOT IN
@@ -441,6 +464,52 @@ func (s *Store) RecordSuccess(id int64, price int64, cur, method string, next in
 		}
 	}
 	return tx.Commit()
+}
+
+// RecordBasisChange stores an observation whose currency or basis differs from
+// the watch's baseline. The observation goes into the history and is shown on
+// the dashboard, but the baseline, last price and alert state are untouched, so
+// no change alert can be raised by comparing unlike things.
+func (s *Store) RecordBasisChange(id int64, o Observation, next int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := s.now()
+	if _, err := tx.Exec(`UPDATE watches SET status='ok', last_error='', last_method=?, last_checked_at=?, next_check_at=?,
+		failures=0, failure_notified=0, sold_out=0, basis_changed=1, obs_price_pence=?, obs_currency=?, obs_basis=? WHERE id=?`,
+		o.Method, now, next, o.Price, o.Currency, o.Basis, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT INTO price_history(watch_id, price_pence, currency, basis, method, checked_at) VALUES(?,?,?,?,?,?)`,
+		id, o.Price, o.Currency, o.Basis, o.Method, now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ConfirmBasis accepts the flagged observation as the new baseline. The alert
+// baseline is reset, as for a new target, so the next check starts afresh.
+func (s *Store) ConfirmBasis(uid, id int64) error {
+	res, err := s.db.Exec(`UPDATE watches SET last_price_pence=obs_price_pence, currency=obs_currency, basis=obs_basis,
+		alert_base_pence=NULL, basis_changed=0, obs_price_pence=NULL, obs_currency='', obs_basis=''
+		WHERE id=? AND user_id=? AND basis_changed=1`, id, uid)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// RecordSoldOut notes that the page says the item is sold out. The last valid
+// price, baseline and alert state are kept and no price is recorded.
+func (s *Store) RecordSoldOut(id int64, next int64) error {
+	_, err := s.db.Exec(`UPDATE watches SET status='ok', sold_out=1, last_error='', last_checked_at=?, next_check_at=?, failures=0, failure_notified=0 WHERE id=?`,
+		s.now(), next, id)
+	return err
 }
 
 // RecordFailure stores a failed check. status is one of error, blocked, stopped.
@@ -475,12 +544,15 @@ func (s *Store) Defer(id int64, next int64) error {
 type HistoryRow struct {
 	PricePence int64
 	Currency   string
+	Basis      string
 	Method     string
 	CheckedAt  int64
 }
 
-func (s *Store) History(watchID int64, limit int) ([]HistoryRow, error) {
-	rows, err := s.db.Query(`SELECT price_pence,currency,method,checked_at FROM price_history WHERE watch_id=? ORDER BY id DESC LIMIT ?`, watchID, limit)
+// History returns the newest observations of a watch, only if uid owns it.
+func (s *Store) History(uid, watchID int64, limit int) ([]HistoryRow, error) {
+	rows, err := s.db.Query(`SELECT h.price_pence,h.currency,h.basis,h.method,h.checked_at FROM price_history h
+		JOIN watches w ON w.id=h.watch_id WHERE h.watch_id=? AND w.user_id=? ORDER BY h.id DESC LIMIT ?`, watchID, uid, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -488,7 +560,7 @@ func (s *Store) History(watchID int64, limit int) ([]HistoryRow, error) {
 	var out []HistoryRow
 	for rows.Next() {
 		var h HistoryRow
-		if err := rows.Scan(&h.PricePence, &h.Currency, &h.Method, &h.CheckedAt); err != nil {
+		if err := rows.Scan(&h.PricePence, &h.Currency, &h.Basis, &h.Method, &h.CheckedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, h)

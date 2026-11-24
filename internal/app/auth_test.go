@@ -193,7 +193,7 @@ func TestHistoryCap(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	h, _ := s.History(id, 10000)
+	h, _ := s.History(uid, id, 10000)
 	if len(h) != HistoryCap {
 		t.Fatalf("history %d want %d", len(h), HistoryCap)
 	}
