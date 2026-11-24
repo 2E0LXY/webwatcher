@@ -132,6 +132,9 @@ func Doctor(getenv func(string) string, w io.Writer) int {
 		need("WW_WA_PHONE_ID", "WW_WA_TOKEN")
 		tl, ta, lang := orDefault(getenv("WW_WA_TPL_LOGIN"), "webwatcher_login"), orDefault(getenv("WW_WA_TPL_ALERT"), "webwatcher_alert"), orDefault(getenv("WW_WA_LANG"), "en_GB")
 		line("OK", "templates: login=%s alert=%s language=%s (must exist and be approved in WhatsApp Manager)", tl, ta, lang)
+	case "dashboard":
+		line("OK", "messenger: dashboard (no WhatsApp provider needed)")
+		line("WARN", "alerts are visible only inside the dashboard until a WhatsApp provider is configured")
 	case "log":
 		if dev {
 			line("WARN", "messenger: log (development only; login links are written to the log)")
@@ -139,7 +142,7 @@ func Doctor(getenv func(string) string, w io.Writer) int {
 			line("FAIL", "WW_MESSENGER is not set to twilio or meta (the log messenger needs WW_DEV=1 and is development only)")
 		}
 	default:
-		line("FAIL", "WW_MESSENGER has an unknown value (use twilio or meta)")
+		line("FAIL", "WW_MESSENGER has an unknown value (use dashboard, twilio or meta)")
 	}
 
 	// Webhook URLs to paste into the provider consoles.
@@ -226,8 +229,22 @@ func checkDir(dir string, line func(level, format string, a ...any)) {
 
 // AddUser creates (or re-uses) the user for phone and prints a one-time
 // magic link to w. It talks to the database directly and is not reachable
-// over HTTP. Only WW_DIR and WW_BASE_URL are read.
+// over HTTP. Only WW_DIR, WW_BASE_URL and WW_MESSENGER are read.
 func AddUser(getenv func(string) string, phone string, w io.Writer) error {
+	return issueLink(getenv, phone, w, false)
+}
+
+// LoginLink prints a fresh one-time login link for an existing user. It is
+// adduser for a number that must already have an account.
+func LoginLink(getenv func(string) string, phone string, w io.Writer) error {
+	return issueLink(getenv, phone, w, true)
+}
+
+func issueLink(getenv func(string) string, phone string, w io.Writer, mustExist bool) error {
+	cmd := "adduser"
+	if mustExist {
+		cmd = "loginlink"
+	}
 	p, err := NormalisePhone(phone)
 	if err != nil {
 		return err
@@ -238,7 +255,7 @@ func AddUser(getenv func(string) string, phone string, w io.Writer) error {
 		return errors.New("WW_BASE_URL must be set to the public URL, for example https://watch.example.com")
 	}
 	if os.Geteuid() == 0 && os.Getenv("WW_ALLOW_ROOT") != "1" {
-		return errors.New("do not run adduser as root: it would create database files the service cannot open. Use: sudo -u webwatcher webwatcher adduser " + p)
+		return errors.New("do not run " + cmd + " as root: it would create database files the service cannot open. Use: sudo -u webwatcher webwatcher " + cmd + " " + p)
 	}
 	dir := orDefault(getenv("WW_DIR"), "./data")
 	db, err := OpenDB(dir)
@@ -247,11 +264,28 @@ func AddUser(getenv func(string) string, phone string, w io.Writer) error {
 	}
 	defer db.Close()
 	st := NewStore(db, SystemClock())
+	if mustExist {
+		ok, err := st.UserExists(p)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("no user with number %s; create the account with: webwatcher adduser %s", MaskPhone(p), p)
+		}
+	}
+	dash := strings.ToLower(strings.TrimSpace(getenv("WW_MESSENGER"))) == "dashboard"
 	raw, hash := newToken()
-	if err := st.CreateAdminLoginToken(p, hash, LoginTokenTTL); err != nil {
+	consent := fmt.Sprintf("consent recorded as %q", ConsentAdminCreated)
+	if dash {
+		err = st.CreateDashboardLoginToken(p, hash, LoginTokenTTL)
+		consent = fmt.Sprintf("source %q, no WhatsApp consent recorded", ConsentDashboard)
+	} else {
+		err = st.CreateAdminLoginToken(p, hash, LoginTokenTTL)
+	}
+	if err != nil {
 		return err
 	}
-	fmt.Fprintf(w, "One-time login link for %s (valid 15 minutes, works once; consent recorded as %q):\n\n%s/auth/%s\n\n", MaskPhone(p), ConsentAdminCreated, base, raw)
+	fmt.Fprintf(w, "One-time login link for %s (valid 15 minutes, works once; %s):\n\n%s/auth/%s\n\n", MaskPhone(p), consent, base, raw)
 	if u.Scheme != "https" {
 		fmt.Fprintln(w, "Note: WW_BASE_URL is not https; production requires https.")
 	}

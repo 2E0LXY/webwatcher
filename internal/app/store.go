@@ -64,7 +64,7 @@ func (s *Store) CreateLoginToken(phone, hash string, ttl time.Duration, consent 
 	if consent {
 		source = "login-form"
 	}
-	return s.createLoginToken(phone, hash, ttl, source)
+	return s.createLoginToken(phone, hash, ttl, source, source != "")
 }
 
 // ConsentAdminCreated is the consent source recorded for users added with the
@@ -74,16 +74,41 @@ const ConsentAdminCreated = "admin-created"
 // CreateAdminLoginToken is CreateLoginToken for the operator CLI: consent is
 // recorded as admin-created.
 func (s *Store) CreateAdminLoginToken(phone, hash string, ttl time.Duration) error {
-	return s.createLoginToken(phone, hash, ttl, ConsentAdminCreated)
+	return s.createLoginToken(phone, hash, ttl, ConsentAdminCreated, true)
 }
 
-func (s *Store) createLoginToken(phone, hash string, ttl time.Duration, source string) error {
+// ConsentDashboard is the consent source recorded for users created while the
+// dashboard messenger is in use. It records no WhatsApp consent (consent_at
+// stays empty), so switching to WhatsApp later sends such a user nothing
+// until they have ticked the opt-in.
+const ConsentDashboard = "dashboard"
+
+// CreateDashboardLoginToken is CreateLoginToken for the operator CLI under the
+// dashboard messenger.
+func (s *Store) CreateDashboardLoginToken(phone, hash string, ttl time.Duration) error {
+	return s.createLoginToken(phone, hash, ttl, ConsentDashboard, false)
+}
+
+// UserExists reports whether a user with this number exists.
+func (s *Store) UserExists(phone string) (bool, error) {
+	var one int
+	err := s.db.QueryRow(`SELECT 1 FROM users WHERE phone=?`, phone).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+func (s *Store) createLoginToken(phone, hash string, ttl time.Duration, source string, withConsent bool) error {
 	now := s.clock.Now()
 	var c *int64
 	var src *string
 	if source != "" {
-		n := now.Unix()
-		c, src = &n, &source
+		src = &source
+		if withConsent {
+			n := now.Unix()
+			c = &n
+		}
 	}
 	_, err := s.db.Exec(`INSERT INTO login_tokens(phone, token_hash, created_at, expires_at, consent_at, consent_source) VALUES(?,?,?,?,?,?)`,
 		phone, hash, now.Unix(), now.Add(ttl).Unix(), c, src)

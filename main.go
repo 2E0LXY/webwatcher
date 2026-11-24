@@ -20,7 +20,7 @@ import (
 var version = "dev"
 
 func main() {
-	if len(os.Args) > 1 && (os.Args[1] == "doctor" || os.Args[1] == "adduser") {
+	if len(os.Args) > 1 && (os.Args[1] == "doctor" || os.Args[1] == "adduser" || os.Args[1] == "loginlink") {
 		os.Exit(subcommand(os.Args[1], os.Args[2:]))
 	}
 	showVersion := flag.Bool("version", false, "print version and exit")
@@ -82,6 +82,7 @@ func run() error {
 
 	clock := app.SystemClock()
 	store := app.NewStore(db, clock)
+	store.UseDashboardAlerts(cfg.Messenger == "dashboard")
 	msgr := app.NewMessenger(cfg)
 	if cfg.BackupKey == nil {
 		slog.Warn("WW_BACKUP_KEY is not set: backups are written unencrypted (file mode 0600, kept 7 days)")
@@ -137,7 +138,7 @@ func run() error {
 	return nil
 }
 
-// subcommand runs the operator commands `doctor` and `adduser` and returns the
+// subcommand runs the operator commands `doctor`, `adduser` and `loginlink` and returns the
 // process exit status. Both read the same settings as the service.
 func subcommand(name string, args []string) int {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
@@ -166,6 +167,15 @@ func subcommand(name string, args []string) int {
 			return 2
 		}
 		if app.Doctor(getenv, os.Stdout) != 0 {
+			return 1
+		}
+	case "loginlink":
+		if len(rest) != 1 {
+			fmt.Fprintln(os.Stderr, "usage: webwatcher loginlink [-env FILE] +447700900123")
+			return 2
+		}
+		if err := app.LoginLink(getenv, rest[0], os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
 			return 1
 		}
 	case "adduser":
