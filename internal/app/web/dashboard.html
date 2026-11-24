@@ -20,6 +20,7 @@
   <input type="hidden" name="csrf" value="{{.CSRF}}">
   <label for="url">Page URL</label>
   <input id="url" name="url" type="url" required maxlength="2048" placeholder="https://www.example.co.uk/product" value="{{.Form.URL}}">
+  {{if .Form.QueryKeys}}<label class="check"><input type="checkbox" name="confirm_query" value="1" required> I understand this URL contains what looks like a token or booking reference ({{.Form.QueryKeys}}) and that Webwatcher will store it and send it to the site</label>{{end}}
   <label for="label">Label (optional)</label>
   <input id="label" name="label" maxlength="80" placeholder="Majorca week in July" value="{{.Form.Label}}">
   <label for="target">Target price in pounds (optional)</label>
@@ -34,7 +35,7 @@
   </details>
   <button type="submit">Start watching</button>
 </form>
-<p class="hint">{{.Count}} of {{.Cap}} watches used.</p>
+<p class="hint">{{.Count}} of {{.Cap}} watches used. Avoid URLs with personal tokens or booking references in the query string: the full URL is stored.</p>
 </section>
 
 {{if .Watches}}

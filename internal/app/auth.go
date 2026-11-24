@@ -101,14 +101,14 @@ func (a *Auth) RequestLogin(ctx context.Context, phone, ip string, consent bool)
 	}
 	raw, hash := newToken()
 	if err := a.store.CreateLoginToken(phone, hash, LoginTokenTTL, consent); err != nil {
-		slog.Error("create login token", "err", err)
+		slog.Error("create login token", "err", RedactPII(err.Error()))
 		return
 	}
 	link := a.baseURL + "/auth/" + raw
 	text := "Your Webwatcher login link: " + link + "\nIt works once and expires in 15 minutes."
 	err := a.msgr.Send(ctx, Message{Kind: KindLogin, To: phone, Text: text, Params: []string{link}})
 	if err != nil {
-		slog.Error("send login message", "messenger", a.msgr.Name(), "err", err)
+		slog.Error("send login message", "messenger", a.msgr.Name(), "err", RedactPII(err.Error()))
 	}
 }
 

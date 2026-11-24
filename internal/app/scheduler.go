@@ -62,7 +62,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 func (s *Scheduler) RunDue(ctx context.Context) int {
 	due, err := s.store.DueWatches(100)
 	if err != nil {
-		slog.Error("scheduler: list due", "err", err)
+		slog.Error("scheduler: list due", "err", RedactPII(err.Error()))
 		return 0
 	}
 	var wg sync.WaitGroup
@@ -132,7 +132,7 @@ func (s *Scheduler) onSuccess(ctx context.Context, w *Watch, res *Result) {
 	if res.NotModified {
 		iv := s.interval(w)
 		if err := s.store.RecordNotModified(w.ID, s.clock.Now().Add(iv+s.jitter(iv)).Unix()); err != nil {
-			slog.Error("record not modified", "watch", w.ID, "host", hostOf(w.URL), "err", err)
+			slog.Error("record not modified", "watch", w.ID, "host", hostOf(w.URL), "err", RedactPII(err.Error()))
 		}
 		return
 	}
@@ -144,7 +144,7 @@ func (s *Scheduler) onSuccess(ctx context.Context, w *Watch, res *Result) {
 	next := s.clock.Now().Add(iv + s.jitter(iv)).Unix()
 	if res.SoldOut {
 		if err := s.store.RecordSoldOut(w.ID, next); err != nil {
-			slog.Error("record sold out", "watch", w.ID, "host", hostOf(w.URL), "err", err)
+			slog.Error("record sold out", "watch", w.ID, "host", hostOf(w.URL), "err", RedactPII(err.Error()))
 		}
 		return
 	}
@@ -152,7 +152,7 @@ func (s *Scheduler) onSuccess(ctx context.Context, w *Watch, res *Result) {
 	// recorded and flagged for the user to confirm, with no alert.
 	if w.LastPricePence != nil && (w.Currency != obs.Currency || w.Basis != obs.Basis) {
 		if err := s.store.RecordBasisChange(w.ID, obs, next); err != nil {
-			slog.Error("record basis change", "watch", w.ID, "host", hostOf(w.URL), "err", err)
+			slog.Error("record basis change", "watch", w.ID, "host", hostOf(w.URL), "err", RedactPII(err.Error()))
 		}
 		return
 	}
@@ -166,7 +166,7 @@ func (s *Scheduler) onSuccess(ctx context.Context, w *Watch, res *Result) {
 	}
 	// The price update and its alert are committed together; the sender loop delivers it.
 	if err := s.store.RecordObservation(w.ID, obs, next, &res.PricePence, qa); err != nil {
-		slog.Error("record success", "watch", w.ID, "host", hostOf(w.URL), "err", err)
+		slog.Error("record success", "watch", w.ID, "host", hostOf(w.URL), "err", RedactPII(err.Error()))
 	}
 }
 
@@ -200,6 +200,6 @@ func (s *Scheduler) onFailure(ctx context.Context, w *Watch, fail *CheckFailure)
 		notice = &QueuedAlert{Kind: AlertFailed, Msg: BuildAlertMessage(AlertFailed, w, nil, 0, fail.Reason, s.baseURL)}
 	}
 	if err := s.store.RecordFailure(w.ID, fail.Status, fail.Reason, failures, next, notice); err != nil {
-		slog.Error("record failure", "watch", w.ID, "host", hostOf(w.URL), "err", err)
+		slog.Error("record failure", "watch", w.ID, "host", hostOf(w.URL), "err", RedactPII(err.Error()))
 	}
 }

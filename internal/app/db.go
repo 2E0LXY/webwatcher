@@ -1,11 +1,14 @@
 package app
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -126,11 +129,25 @@ var migrations = []string{
 }
 
 // OpenDB opens (creating if needed) the SQLite database in dir and migrates it.
+// The directory is 0700 and the database file 0600.
 func OpenDB(dir string) (*sql.DB, error) {
-	if err := os.MkdirAll(dir, 0o750); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	dsn := "file:" + filepath.Join(dir, "webwatcher.db") +
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(dir, "webwatcher.db")
+	// Create the file ourselves so it never exists with wider permissions.
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	f.Close()
+	if err := os.Chmod(path, 0o600); err != nil {
+		return nil, err
+	}
+	dsn := "file:" + path +
 		"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -141,6 +158,9 @@ func OpenDB(dir string) (*sql.DB, error) {
 	if err := migrate(db); err != nil {
 		db.Close()
 		return nil, err
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		os.Chmod(path+suffix, 0o600) // best effort: SQLite normally inherits 0600 already
 	}
 	return db, nil
 }
@@ -170,46 +190,145 @@ func migrate(db *sql.DB) error {
 	return nil
 }
 
-const backupKeep = 7
+// BackupRetention is how long backups are kept. Older ones are deleted.
+const BackupRetention = 7 * 24 * time.Hour
 
-// BackupDB writes a consistent snapshot to dir/backups/webwatcher-YYYYMMDD.db
-// (replacing any earlier file for the same day) and prunes to the newest 7.
+const backupMagic = "WWBK1"
+
+// BackupDB writes an unencrypted snapshot (mode 0600). See BackupDBKey.
 func BackupDB(db *sql.DB, dir string, now time.Time) (string, error) {
+	return BackupDBKey(db, dir, now, nil)
+}
+
+// BackupDBKey writes a consistent snapshot to dir/backups/webwatcher-YYYYMMDD.db
+// (replacing any earlier file for the same day). With a 32-byte key the file is
+// AES-256-GCM encrypted and named .db.enc. The backups directory is 0700, files
+// are 0600, and backups older than seven days are deleted.
+func BackupDBKey(db *sql.DB, dir string, now time.Time, key []byte) (string, error) {
 	bdir := filepath.Join(dir, "backups")
-	if err := os.MkdirAll(bdir, 0o750); err != nil {
+	if err := os.MkdirAll(bdir, 0o700); err != nil {
 		return "", err
 	}
-	name := filepath.Join(bdir, "webwatcher-"+now.UTC().Format("20060102")+".db")
-	tmp := name + ".tmp"
+	if err := os.Chmod(bdir, 0o700); err != nil {
+		return "", err
+	}
+	base := filepath.Join(bdir, "webwatcher-"+now.UTC().Format("20060102")+".db")
+	tmp := base + ".tmp"
 	os.Remove(tmp)
 	// The path is generated here, never user input; VACUUM INTO cannot bind it.
 	if _, err := db.Exec(`VACUUM INTO ?`, tmp); err != nil {
 		return "", err
 	}
-	if err := os.Rename(tmp, name); err != nil {
+	defer os.Remove(tmp) // never leave a plaintext copy behind when encrypting
+	if err := os.Chmod(tmp, 0o600); err != nil {
 		return "", err
 	}
-	return name, pruneBackups(bdir)
+	name := base
+	if key != nil {
+		plain, err := os.ReadFile(tmp)
+		if err != nil {
+			return "", err
+		}
+		enc, err := EncryptBackup(key, plain)
+		if err != nil {
+			return "", err
+		}
+		name = base + ".enc"
+		etmp := name + ".tmp"
+		if err := os.WriteFile(etmp, enc, 0o600); err != nil {
+			return "", err
+		}
+		if err := os.Rename(etmp, name); err != nil {
+			return "", err
+		}
+		os.Remove(base) // a plain backup from earlier today, if the key was added since
+	} else if err := os.Rename(tmp, name); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(name, 0o600); err != nil {
+		return "", err
+	}
+	return name, pruneBackups(bdir, now)
 }
 
-func pruneBackups(bdir string) error {
+// EncryptBackup returns magic || nonce || AES-256-GCM(plaintext).
+func EncryptBackup(key, plain []byte) ([]byte, error) {
+	if len(key) != 32 {
+		return nil, errors.New("backup key must be 32 bytes")
+	}
+	blk, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(blk)
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, err
+	}
+	out := append([]byte(backupMagic), nonce...)
+	return gcm.Seal(out, nonce, plain, []byte(backupMagic)), nil
+}
+
+// DecryptBackup reverses EncryptBackup. A wrong key or a damaged file fails.
+func DecryptBackup(key, data []byte) ([]byte, error) {
+	if len(key) != 32 {
+		return nil, errors.New("backup key must be 32 bytes")
+	}
+	blk, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(blk)
+	if err != nil {
+		return nil, err
+	}
+	n := len(backupMagic) + gcm.NonceSize()
+	if len(data) < n+gcm.Overhead() || string(data[:len(backupMagic)]) != backupMagic {
+		return nil, errors.New("not a webwatcher encrypted backup")
+	}
+	plain, err := gcm.Open(nil, data[len(backupMagic):n], data[n:], []byte(backupMagic))
+	if err != nil {
+		return nil, errors.New("could not decrypt the backup (wrong key or damaged file)")
+	}
+	return plain, nil
+}
+
+// pruneBackups deletes backups dated seven or more days before now, and any
+// stray temporary files.
+func pruneBackups(bdir string, now time.Time) error {
 	ents, err := os.ReadDir(bdir)
 	if err != nil {
 		return err
 	}
-	var names []string
+	cutoff := now.UTC().Truncate(24 * time.Hour).Add(-BackupRetention)
 	for _, e := range ents {
 		n := e.Name()
-		if strings.HasPrefix(n, "webwatcher-") && strings.HasSuffix(n, ".db") {
-			names = append(names, n)
+		if !strings.HasPrefix(n, "webwatcher-") || len(n) < len("webwatcher-20060102") {
+			continue
 		}
-	}
-	sort.Strings(names)
-	for len(names) > backupKeep {
-		if err := os.Remove(filepath.Join(bdir, names[0])); err != nil {
-			return err
+		d, err := time.Parse("20060102", n[len("webwatcher-"):len("webwatcher-20060102")])
+		if err != nil {
+			continue
 		}
-		names = names[1:]
+		if !d.After(cutoff) {
+			if err := os.Remove(filepath.Join(bdir, n)); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
+}
+
+// BackupExists reports whether a backup for the day of now already exists.
+func BackupExists(dir string, now time.Time) bool {
+	base := filepath.Join(dir, "backups", "webwatcher-"+now.UTC().Format("20060102")+".db")
+	for _, p := range []string{base, base + ".enc"} {
+		if _, err := os.Stat(p); err == nil {
+			return true
+		}
+	}
+	return false
 }

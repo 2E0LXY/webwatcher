@@ -21,9 +21,18 @@ var version = "dev"
 
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
+	decrypt := flag.String("decrypt-backup", "", "decrypt an encrypted backup file (key from WW_BACKUP_KEY) and exit")
+	out := flag.String("out", "", "output file for -decrypt-backup")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println(version)
+		return
+	}
+	if *decrypt != "" {
+		if err := decryptBackup(*decrypt, *out); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
 		return
 	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
@@ -31,6 +40,28 @@ func main() {
 		slog.Error("fatal", "err", err)
 		os.Exit(1)
 	}
+}
+
+func decryptBackup(in, out string) error {
+	if out == "" {
+		return errors.New("-out is required")
+	}
+	cfg, err := app.LoadConfig(os.Getenv)
+	if err != nil {
+		return err
+	}
+	if cfg.BackupKey == nil {
+		return errors.New("WW_BACKUP_KEY is not set")
+	}
+	data, err := os.ReadFile(in)
+	if err != nil {
+		return err
+	}
+	plain, err := app.DecryptBackup(cfg.BackupKey, data)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(out, plain, 0o600)
 }
 
 func run() error {
@@ -49,6 +80,9 @@ func run() error {
 	clock := app.SystemClock()
 	store := app.NewStore(db, clock)
 	msgr := app.NewMessenger(cfg)
+	if cfg.BackupKey == nil {
+		slog.Warn("WW_BACKUP_KEY is not set: backups are written unencrypted (file mode 0600, kept 7 days)")
+	}
 	if cfg.Messenger == "log" && !cfg.Dev {
 		slog.Warn("WW_MESSENGER=log writes login links to the log; use it for development only")
 	}
@@ -69,7 +103,10 @@ func run() error {
 	wg.Add(3)
 	go func() { defer wg.Done(); sched.Run(ctx) }()
 	go func() { defer wg.Done(); sender.Run(ctx) }()
-	go func() { defer wg.Done(); app.RunMaintenance(ctx, db, store, cfg.Dir, clock) }()
+	go func() {
+		defer wg.Done()
+		app.RunMaintenance(ctx, db, store, clock, app.MaintenanceConfig{Dir: cfg.Dir, BackupKey: cfg.BackupKey, RetainHistoryDays: cfg.RetainHistoryDays, RetainDiagDays: cfg.RetainDiagDays})
+	}()
 
 	hs := &http.Server{
 		Addr: cfg.Addr, Handler: srv.Handler(),

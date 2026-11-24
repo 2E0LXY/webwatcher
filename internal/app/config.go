@@ -2,6 +2,7 @@
 package app
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/url"
@@ -26,15 +27,18 @@ type Config struct {
 	Dev        bool
 	Messenger  string
 
-	WAPhoneID     string
-	WAToken       string
-	WATplLogin    string
-	WATplAlert    string
-	WALang        string
-	RespectRobots bool   // WW_RESPECT_ROBOTS=1: opt-in robots.txt checks (default off)
-	SendBudget    int    // global outbound alert messages per hour
-	WAAppSecret   string // Meta webhook HMAC secret
-	WAVerifyToken string // Meta webhook GET verification token
+	WAPhoneID         string
+	WAToken           string
+	WATplLogin        string
+	WATplAlert        string
+	WALang            string
+	RetainHistoryDays int    // price_history older than this is purged daily (default 90)
+	RetainDiagDays    int    // check log and finished outbox rows older than this are purged daily (default 30)
+	BackupKey         []byte // 32-byte AES-256-GCM key for backups; nil = unencrypted (still 0600)
+	RespectRobots     bool   // WW_RESPECT_ROBOTS=1: opt-in robots.txt checks (default off)
+	SendBudget        int    // global outbound alert messages per hour
+	WAAppSecret       string // Meta webhook HMAC secret
+	WAVerifyToken     string // Meta webhook GET verification token
 
 	TwSID          string
 	TwToken        string
@@ -71,6 +75,27 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		TwContentLogin: strings.TrimSpace(getenv("WW_TWILIO_CONTENT_LOGIN")),
 		TwContentAlert: strings.TrimSpace(getenv("WW_TWILIO_CONTENT_ALERT")),
 	}
+	for _, d := range []struct {
+		name string
+		dst  *int
+		def  int
+	}{{"WW_RETAIN_HISTORY_DAYS", &c.RetainHistoryDays, 90}, {"WW_RETAIN_DIAG_DAYS", &c.RetainDiagDays, 30}} {
+		*d.dst = d.def
+		if v := strings.TrimSpace(getenv(d.name)); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 1 || n > 3650 {
+				return c, fmt.Errorf("%s must be a whole number of days from 1 to 3650, got %q", d.name, v)
+			}
+			*d.dst = n
+		}
+	}
+	if v := strings.TrimSpace(getenv("WW_BACKUP_KEY")); v != "" {
+		k, err := decodeBackupKey(v)
+		if err != nil {
+			return c, err
+		}
+		c.BackupKey = k
+	}
 	c.RespectRobots = getenv("WW_RESPECT_ROBOTS") == "1"
 	c.SendBudget = 200
 	if v := strings.TrimSpace(getenv("WW_SEND_BUDGET_PER_HOUR")); v != "" {
@@ -101,6 +126,15 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		return c, fmt.Errorf("unknown WW_MESSENGER %q (use log, meta or twilio)", c.Messenger)
 	}
 	return c, nil
+}
+
+func decodeBackupKey(v string) ([]byte, error) {
+	for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
+		if k, err := enc.DecodeString(v); err == nil && len(k) == 32 {
+			return k, nil
+		}
+	}
+	return nil, errors.New("WW_BACKUP_KEY must be 32 random bytes, base64 encoded (for example: openssl rand -base64 32)")
 }
 
 // SecureCookies reports whether session cookies should carry the Secure flag.

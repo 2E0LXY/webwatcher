@@ -134,7 +134,7 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 		sw := &statusWriter{ResponseWriter: w, status: 200}
 		defer func() {
 			if rec := recover(); rec != nil {
-				slog.Error("panic", "path", logPath(r), "panic", fmt.Sprint(rec))
+				slog.Error("panic", "path", logPath(r), "panic", RedactPII(fmt.Sprint(rec)))
 				if sw.status == 200 {
 					http.Error(sw, "internal error", http.StatusInternalServerError)
 				}
@@ -291,6 +291,7 @@ type histView struct{ Price, When, Method string }
 type formVals struct {
 	URL, Label, Selector, Target string
 	Interval                     int
+	QueryKeys                    string // names of token-like query parameters; needs a confirmation tick
 }
 
 type pageData struct {
@@ -324,7 +325,7 @@ func (s *Server) render(w http.ResponseWriter, status int, page string, d pageDa
 	d.Dev = s.cfg.Dev
 	var buf bytes.Buffer
 	if err := s.pages[page].ExecuteTemplate(&buf, "layout", d); err != nil {
-		slog.Error("render", "page", page, "err", err)
+		slog.Error("render", "page", page, "err", RedactPII(err.Error()))
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -518,7 +519,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request, sess *Sess
 func (s *Server) renderDashboard(w http.ResponseWriter, r *http.Request, sess *Session, status int, f formVals, errMsg string) {
 	ws, err := s.store.ListWatches(sess.UserID)
 	if err != nil {
-		slog.Error("list watches", "err", err)
+		slog.Error("list watches", "err", RedactPII(err.Error()))
 		s.message(w, r, 500, "Error", "Something went wrong.")
 		return
 	}
@@ -575,6 +576,12 @@ func (s *Server) handleAddWatch(w http.ResponseWriter, r *http.Request, sess *Se
 		fail(err.Error())
 		return
 	}
+	if keys := SensitiveQueryKeys(clean); len(keys) > 0 && r.PostFormValue("confirm_query") != "1" {
+		f.QueryKeys = strings.Join(keys, ", ")
+		fail("This URL has query parameters that look like a token, session or booking reference (" + f.QueryKeys +
+			"). Webwatcher stores the full URL and sends it to the site on every check, and anyone with access to your account or its backups could see it. Tick the box below to confirm, or remove the parameters.")
+		return
+	}
 	if len([]rune(f.Label)) > 80 {
 		fail("The label can be at most 80 characters.")
 		return
@@ -596,7 +603,7 @@ func (s *Server) handleAddWatch(w http.ResponseWriter, r *http.Request, sess *Se
 		return
 	}
 	if err != nil {
-		slog.Error("add watch", "err", err)
+		slog.Error("add watch", "err", RedactPII(err.Error()))
 		fail("Could not save the watch.")
 		return
 	}
@@ -734,7 +741,7 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request, ses
 		return
 	}
 	if err := s.store.DeleteUser(sess.UserID); err != nil {
-		slog.Error("delete account", "err", err)
+		slog.Error("delete account", "err", RedactPII(err.Error()))
 		s.message(w, r, 500, "Error", "Could not delete the account.")
 		return
 	}

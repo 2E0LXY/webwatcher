@@ -40,7 +40,7 @@ func (s *Server) applyOptCommand(provider, msgID, from, body string) {
 	phone := "+" + strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(from), "whatsapp:"), "+")
 	replay, err := s.store.ApplyInbound(provider, msgID, phone, on)
 	if err != nil {
-		slog.Error("inbound command", "provider", provider, "err", err)
+		slog.Error("inbound command", "provider", provider, "err", RedactPII(err.Error()))
 		return
 	}
 	if replay {

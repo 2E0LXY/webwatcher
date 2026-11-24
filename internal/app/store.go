@@ -222,6 +222,35 @@ func (s *Store) Cleanup() error {
 	return err
 }
 
+// Purge applies the retention rules: price history older than historyDays, and
+// check logs, finished outbox rows and old send records older than diagDays.
+// The newest alert record per watch and kind is kept, as it drives de-duplication.
+func (s *Store) Purge(historyDays, diagDays int) error {
+	now := s.now()
+	h, d := now-int64(historyDays)*86400, now-int64(diagDays)*86400
+	for _, q := range []struct {
+		sql string
+		arg int64
+	}{
+		{`DELETE FROM price_history WHERE checked_at<?`, h},
+		{`DELETE FROM alerts_sent WHERE sent_at<? AND id NOT IN (SELECT MAX(id) FROM alerts_sent GROUP BY watch_id, kind)`, h},
+		{`DELETE FROM check_log WHERE checked_at<?`, d},
+		{`DELETE FROM outbox WHERE status<>'queued' AND COALESCE(done_at, created_at)<?`, d},
+		{`DELETE FROM send_log WHERE at<?`, now - 7200},
+	} {
+		if _, err := s.db.Exec(q.sql, q.arg); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// DeleteUserSessions revokes every session of the user ("log out everywhere").
+func (s *Store) DeleteUserSessions(uid int64) error {
+	_, err := s.db.Exec(`DELETE FROM sessions WHERE user_id=?`, uid)
+	return err
+}
+
 // ---- watches ----
 
 type Watch struct {
