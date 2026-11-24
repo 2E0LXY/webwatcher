@@ -89,6 +89,7 @@ func run() error {
 	}
 	auth := app.NewAuth(store, msgr, clock, cfg.BaseURL)
 	auth.SetSendBudget(cfg.SendBudget)
+	auth.SetSessionTTL(cfg.SessionLifetime())
 	srv, err := app.NewServer(cfg, store, auth, msgr, clock)
 	if err != nil {
 		return err

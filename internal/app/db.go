@@ -149,6 +149,14 @@ var migrations = []string{
 		read_at INTEGER
 	);
 	CREATE INDEX notifications_user ON notifications(user_id, id);`,
+	`CREATE TABLE personal_links (
+		id INTEGER PRIMARY KEY,
+		user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+		token_hash TEXT NOT NULL UNIQUE,
+		created_at INTEGER NOT NULL,
+		last_used_at INTEGER,
+		revoked_at INTEGER
+	);`,
 }
 
 // OpenDB opens (creating if needed) the SQLite database in dir and migrates it.

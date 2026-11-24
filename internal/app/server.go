@@ -542,7 +542,7 @@ func (s *Server) handleAuthConsume(w http.ResponseWriter, r *http.Request) {
 		s.message(w, r, http.StatusUnauthorized, "Link not valid", "This login link has expired or has already been used. "+s.newLinkAdvice())
 		return
 	}
-	s.setCookie(w, s.sessionCookieName(), sess, int(SessionTTL.Seconds()))
+	s.setCookie(w, s.sessionCookieName(), sess, int(s.cfg.SessionLifetime().Seconds()))
 	s.setCookie(w, preCookie, "", -1)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }

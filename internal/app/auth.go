@@ -119,6 +119,7 @@ type Auth struct {
 	byPhone *RateLimiter
 	byIP    *RateLimiter
 	budget  int // global outbound messages per hour; login links may use half of it
+	sessTTL time.Duration
 }
 
 func NewAuth(store *Store, msgr Messenger, clock Clock, baseURL string) *Auth {
@@ -127,7 +128,25 @@ func NewAuth(store *Store, msgr Messenger, clock Clock, baseURL string) *Auth {
 		byPhone: NewRateLimiter(5, time.Hour),
 		byIP:    NewRateLimiter(20, time.Hour),
 		budget:  200,
+		sessTTL: SessionTTL,
 	}
+}
+
+// SetSessionTTL sets the session lifetime (default SessionTTL).
+func (a *Auth) SetSessionTTL(d time.Duration) {
+	if d > 0 {
+		a.sessTTL = d
+	}
+}
+
+// StartSession creates a session for the user and returns its raw token and CSRF token.
+func (a *Auth) StartSession(uid int64) (sessionRaw, csrf string, err error) {
+	sessionRaw, sh := newToken()
+	csrf, _ = newToken()
+	if err := a.store.CreateSession(uid, sh, csrf, a.sessTTL); err != nil {
+		return "", "", err
+	}
+	return sessionRaw, csrf, nil
 }
 
 // SetSendBudget sets the global hourly message budget shared with alerts.
@@ -177,12 +196,7 @@ func (a *Auth) Consume(rawToken string) (sessionRaw, csrf string, err error) {
 	if err != nil {
 		return "", "", err
 	}
-	sessionRaw, sh := newToken()
-	csrf, _ = newToken()
-	if err := a.store.CreateSession(uid, sh, csrf, SessionTTL); err != nil {
-		return "", "", err
-	}
-	return sessionRaw, csrf, nil
+	return a.StartSession(uid)
 }
 
 func (a *Auth) Session(raw string) (*Session, error) {
@@ -190,4 +204,19 @@ func (a *Auth) Session(raw string) (*Session, error) {
 		return nil, ErrNotFound
 	}
 	return a.store.SessionByHash(hashToken(raw))
+}
+
+// Blocked reports whether key has used up its allowance in the window, without
+// recording a hit.
+func (r *RateLimiter) Blocked(key string, now time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cut := now.Add(-r.window)
+	n := 0
+	for _, t := range r.hits[key] {
+		if t.After(cut) {
+			n++
+		}
+	}
+	return n >= r.limit
 }

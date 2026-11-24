@@ -185,7 +185,7 @@ func (s *Store) DeleteUser(uid int64) error {
 	if _, err := tx.Exec(`DELETE FROM login_tokens WHERE phone=(SELECT phone FROM users WHERE id=?)`, uid); err != nil {
 		return err
 	}
-	for _, q := range []string{`DELETE FROM outbox WHERE user_id=?`, `DELETE FROM notifications WHERE user_id=?`, `DELETE FROM sessions WHERE user_id=?`} {
+	for _, q := range []string{`DELETE FROM outbox WHERE user_id=?`, `DELETE FROM notifications WHERE user_id=?`, `DELETE FROM sessions WHERE user_id=?`, `DELETE FROM personal_links WHERE user_id=?`} {
 		if _, err := tx.Exec(q, uid); err != nil {
 			return err
 		}
@@ -771,4 +771,104 @@ func (s *Store) History(uid, watchID int64, limit int) ([]HistoryRow, error) {
 func (s *Store) RecordAlert(watchID int64, kind string, price int64) error {
 	_, err := s.db.Exec(`INSERT INTO alerts_sent(watch_id,kind,price_pence,sent_at) VALUES(?,?,?,?)`, watchID, kind, price, s.now())
 	return err
+}
+
+// ---- personal (permanent) login links ----
+
+// PersonalLinkInfo describes a user's permanent link. It never carries the token.
+type PersonalLinkInfo struct {
+	Exists     bool // a link was created and has not been revoked
+	CreatedAt  time.Time
+	LastUsedAt *time.Time
+	RevokedAt  *time.Time
+}
+
+// EnsureUser returns the id of the user with this number, creating the user
+// when absent. A new user gets the consent the operator CLI records: admin-created
+// consent normally, or the dashboard source (no WhatsApp consent) under the
+// dashboard messenger. An existing user is left as it is.
+func (s *Store) EnsureUser(phone string, dashboard bool) (int64, error) {
+	now := s.now()
+	src, consent := ConsentAdminCreated, any(now)
+	if dashboard {
+		src, consent = ConsentDashboard, nil
+	}
+	var uid int64
+	err := s.db.QueryRow(`INSERT INTO users(phone, created_at, last_login_at, consent_at, consent_source) VALUES(?,?,?,?,?)
+		ON CONFLICT(phone) DO UPDATE SET phone=phone RETURNING id`, phone, now, now, consent, src).Scan(&uid)
+	return uid, err
+}
+
+// UserID looks a user up by number.
+func (s *Store) UserID(phone string) (int64, error) {
+	var uid int64
+	err := s.db.QueryRow(`SELECT id FROM users WHERE phone=?`, phone).Scan(&uid)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	return uid, err
+}
+
+// SetPersonalLink creates the user's permanent link or rotates it, replacing
+// the previous hash (the old link stops working at once) and clearing any
+// revocation. Only the hash is stored.
+func (s *Store) SetPersonalLink(uid int64, hash string) error {
+	_, err := s.db.Exec(`INSERT INTO personal_links(user_id, token_hash, created_at) VALUES(?,?,?)
+		ON CONFLICT(user_id) DO UPDATE SET token_hash=excluded.token_hash, created_at=excluded.created_at,
+			last_used_at=NULL, revoked_at=NULL`, uid, hash, s.now())
+	return err
+}
+
+// RevokePersonalLink revokes the user's permanent link. It reports whether an
+// active link existed.
+func (s *Store) RevokePersonalLink(uid int64) (bool, error) {
+	res, err := s.db.Exec(`UPDATE personal_links SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL`, s.now(), uid)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// PersonalLinkStatus reports the user's link state (never the token).
+func (s *Store) PersonalLinkStatus(uid int64) (PersonalLinkInfo, error) {
+	var created int64
+	var used, revoked *int64
+	err := s.db.QueryRow(`SELECT created_at, last_used_at, revoked_at FROM personal_links WHERE user_id=?`, uid).Scan(&created, &used, &revoked)
+	if errors.Is(err, sql.ErrNoRows) {
+		return PersonalLinkInfo{}, nil
+	}
+	if err != nil {
+		return PersonalLinkInfo{}, err
+	}
+	info := PersonalLinkInfo{Exists: revoked == nil, CreatedAt: time.Unix(created, 0)}
+	if used != nil {
+		t := time.Unix(*used, 0)
+		info.LastUsedAt = &t
+	}
+	if revoked != nil {
+		t := time.Unix(*revoked, 0)
+		info.RevokedAt = &t
+	}
+	return info, nil
+}
+
+// UsePersonalLink looks a link up by the hash of its token. When it is valid
+// and not revoked it records the use and returns the user id; otherwise
+// ErrInvalidToken. The token is not consumed. The stored hash is compared in
+// constant time as well as by index.
+func (s *Store) UsePersonalLink(hash string) (int64, error) {
+	var uid int64
+	var stored string
+	err := s.db.QueryRow(`SELECT user_id, token_hash FROM personal_links WHERE token_hash=? AND revoked_at IS NULL`, hash).Scan(&uid, &stored)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && !ctEqual(stored, hash)) {
+		return 0, ErrInvalidToken
+	}
+	if err != nil {
+		return 0, err
+	}
+	if _, err := s.db.Exec(`UPDATE personal_links SET last_used_at=? WHERE user_id=?`, s.now(), uid); err != nil {
+		return 0, err
+	}
+	return uid, nil
 }

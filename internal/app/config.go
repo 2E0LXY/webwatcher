@@ -37,6 +37,7 @@ type Config struct {
 	BackupKey         []byte // 32-byte AES-256-GCM key for backups; nil = unencrypted (still 0600)
 	RespectRobots     bool   // WW_RESPECT_ROBOTS=1: opt-in robots.txt checks (default off)
 	SendBudget        int    // global outbound alert messages per hour
+	SessionDays       int    // WW_SESSION_DAYS: login session lifetime (default 30)
 	WAAppSecret       string // Meta webhook HMAC secret
 	WAVerifyToken     string // Meta webhook GET verification token
 
@@ -96,6 +97,14 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		}
 		c.BackupKey = k
 	}
+	c.SessionDays = 30
+	if v := strings.TrimSpace(getenv("WW_SESSION_DAYS")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 365 {
+			return c, fmt.Errorf("WW_SESSION_DAYS must be a whole number of days from 1 to 365, got %q", v)
+		}
+		c.SessionDays = n
+	}
 	c.RespectRobots = getenv("WW_RESPECT_ROBOTS") == "1"
 	c.SendBudget = 200
 	if v := strings.TrimSpace(getenv("WW_SEND_BUDGET_PER_HOUR")); v != "" {
@@ -143,6 +152,14 @@ func decodeBackupKey(v string) ([]byte, error) {
 		}
 	}
 	return nil, errors.New("WW_BACKUP_KEY must be 32 random bytes, base64 encoded (for example: openssl rand -base64 32)")
+}
+
+// SessionLifetime is the login session lifetime (30 days when unset).
+func (c Config) SessionLifetime() time.Duration {
+	if c.SessionDays < 1 {
+		return SessionTTL
+	}
+	return time.Duration(c.SessionDays) * 24 * time.Hour
 }
 
 // SecureCookies reports whether session cookies should carry the Secure flag.
