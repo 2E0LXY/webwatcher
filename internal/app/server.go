@@ -21,7 +21,7 @@ import (
 	_ "time/tzdata" // static binary: do not depend on the host zoneinfo
 )
 
-//go:embed web/*.html web/style.css
+//go:embed web/*.html web/style.css web/notify.js
 var webFS embed.FS
 
 const (
@@ -53,7 +53,7 @@ type Server struct {
 
 func NewServer(cfg Config, store *Store, auth *Auth, msgr Messenger, clock Clock) (*Server, error) {
 	s := &Server{cfg: cfg, store: store, auth: auth, msgr: msgr, clock: clock, db: store.db, pages: map[string]*template.Template{}}
-	for _, p := range []string{"login", "sent", "confirm", "dashboard", "watch", "account", "dev", "message"} {
+	for _, p := range []string{"login", "sent", "confirm", "dashboard", "watch", "account", "dev", "message", "notifications"} {
 		t, err := template.ParseFS(webFS, "web/layout.html", "web/"+p+".html")
 		if err != nil {
 			return nil, err
@@ -84,6 +84,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /account", s.withSession(s.handleAccount))
 	mux.HandleFunc("POST /account/delete", s.withSession(s.handleDeleteAccount))
 	mux.HandleFunc("POST /account/logout-everywhere", s.withSession(s.handleLogoutEverywhere))
+	mux.HandleFunc("GET /notifications", s.withSession(s.handleNotifications))
+	mux.HandleFunc("GET /notifications/count", s.withSession(s.handleNotificationCount))
+	mux.HandleFunc("POST /notifications/read-all", s.withSession(s.handleReadAll))
+	mux.HandleFunc("POST /notifications/{id}/read", s.withSession(s.handleReadOne))
 	mux.HandleFunc("POST /account/alerts", s.withSession(s.handleToggleAlerts))
 	mux.HandleFunc("GET /hook/meta", s.handleMetaVerify)
 	mux.HandleFunc("POST /hook/meta", s.handleMetaPost)
@@ -97,12 +101,12 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) staticHandler() http.Handler {
 	fs := http.FileServerFS(webFS)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "style.css" {
+		if r.URL.Path != "style.css" && r.URL.Path != "notify.js" {
 			http.NotFound(w, r)
 			return
 		}
 		r2 := r.Clone(r.Context())
-		r2.URL.Path = "/web/style.css"
+		r2.URL.Path = "/web/" + r.URL.Path
 		w.Header().Set("Cache-Control", "public, max-age=3600")
 		fs.ServeHTTP(w, r2)
 	})
@@ -317,6 +321,21 @@ type pageData struct {
 	Token     string
 	AlertsOn  bool
 	Consented bool
+	UserID    int64 // set on logged-in pages so the header can show the unread badge
+	Dashboard bool  // WW_MESSENGER=dashboard
+	Unread    int
+	Banner    *notifView
+	Notifs    []notifView
+}
+
+type notifView struct {
+	ID      int64
+	WatchID int64 // 0 if the watch no longer exists
+	Kind    string
+	Title   string
+	Body    string
+	When    string
+	Unread  bool
 }
 
 type devMsg struct{ Kind, To, Text, Link string }
@@ -324,6 +343,10 @@ type devMsg struct{ Kind, To, Text, Link string }
 func (s *Server) render(w http.ResponseWriter, status int, page string, d pageData) {
 	d.Version = Version
 	d.Dev = s.cfg.Dev
+	d.Dashboard = s.dashboardOnly()
+	if d.LoggedIn && d.UserID != 0 {
+		d.Unread, _ = s.store.UnreadCount(d.UserID)
+	}
 	var buf bytes.Buffer
 	if err := s.pages[page].ExecuteTemplate(&buf, "layout", d); err != nil {
 		slog.Error("render", "page", page, "err", RedactPII(err.Error()))
@@ -338,14 +361,14 @@ func (s *Server) render(w http.ResponseWriter, status int, page string, d pageDa
 func (s *Server) message(w http.ResponseWriter, r *http.Request, status int, heading, body string) {
 	d := pageData{Title: heading, Heading: heading, Body: body}
 	if sess := s.session(r); sess != nil {
-		d.LoggedIn, d.Phone = true, sess.Phone
+		d.LoggedIn, d.Phone, d.UserID = true, sess.Phone, sess.UserID
 	}
 	s.render(w, status, "message", d)
 }
 
 var flashes = map[string]string{
 	"added": "Watch added. The first check happens within a minute or so.", "deleted": "Watch deleted.",
-	"saved": "Changes saved.", "confirmed": "New price basis confirmed. The baseline has been reset.", "alerts_on": "WhatsApp alerts are on.", "alerts_off": "WhatsApp alerts are off. You will get no more alert messages.", "paused": "Watch paused.", "resumed": "Watch resumed.",
+	"saved": "Changes saved.", "confirmed": "New price basis confirmed. The baseline has been reset.", "alerts_on": "WhatsApp alerts are on.", "alerts_off": "WhatsApp alerts are off. You will get no more alert messages.", "read": "Marked as read.", "allread": "All notifications marked as read.", "paused": "Watch paused.", "resumed": "Watch resumed.",
 }
 
 func intervalLabel(m int) string {
@@ -450,11 +473,28 @@ func (s *Server) handleLoginForm(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
+	if s.dashboardOnly() {
+		s.renderLogin(w, http.StatusOK)
+		return
+	}
 	s.render(w, http.StatusOK, "login", pageData{Title: "Log in", CSRF: s.preCSRF(w, r)})
+}
+
+// dashboardOnly reports whether no WhatsApp provider is in use, so login
+// links come from the administrator rather than a message.
+func (s *Server) dashboardOnly() bool { return s.cfg.Messenger == "dashboard" }
+
+func (s *Server) renderLogin(w http.ResponseWriter, status int) {
+	s.render(w, status, "login", pageData{Title: "Log in"})
 }
 
 func (s *Server) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 	if !s.parseForm(w, r) {
+		return
+	}
+	if s.dashboardOnly() {
+		// No lookup, no send, no validation: one response for every number.
+		s.renderLogin(w, http.StatusOK)
 		return
 	}
 	if !s.checkPreCSRF(r) {
@@ -499,12 +539,19 @@ func (s *Server) handleAuthConsume(w http.ResponseWriter, r *http.Request) {
 	}
 	sess, _, err := s.auth.Consume(r.PathValue("token"))
 	if err != nil {
-		s.message(w, r, http.StatusUnauthorized, "Link not valid", "This login link has expired or has already been used. Request a new one from the login page.")
+		s.message(w, r, http.StatusUnauthorized, "Link not valid", "This login link has expired or has already been used. "+s.newLinkAdvice())
 		return
 	}
 	s.setCookie(w, s.sessionCookieName(), sess, int(SessionTTL.Seconds()))
 	s.setCookie(w, preCookie, "", -1)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func (s *Server) newLinkAdvice() string {
+	if s.dashboardOnly() {
+		return "Ask the administrator for a new one."
+	}
+	return "Request a new one from the login page."
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request, sess *Session) {
@@ -524,11 +571,15 @@ func (s *Server) renderDashboard(w http.ResponseWriter, r *http.Request, sess *S
 		s.message(w, r, 500, "Error", "Something went wrong.")
 		return
 	}
-	d := pageData{Title: "Dashboard", Phone: sess.Phone, CSRF: sess.CSRF, LoggedIn: true, Form: f, Error: errMsg,
+	d := pageData{Title: "Dashboard", UserID: sess.UserID, Phone: sess.Phone, CSRF: sess.CSRF, LoggedIn: true, Form: f, Error: errMsg,
 		Flash: flashes[r.URL.Query().Get("m")], Intervals: intervalOpts(f.Interval), Count: len(ws), Cap: MaxWatchesPerUser,
 		AlertsOn: sess.AlertsEnabled, Consented: sess.ConsentAt != nil}
 	for _, x := range ws {
 		d.Watches = append(d.Watches, s.view(x))
+	}
+	if b, err := s.store.LatestUnread(sess.UserID); err == nil {
+		v := s.notifView(b)
+		d.Banner = &v
 	}
 	s.render(w, status, "dashboard", d)
 }
@@ -641,7 +692,7 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request, sess *Sessi
 func (s *Server) renderWatch(w http.ResponseWriter, status int, sess *Session, wt *Watch, errMsg, flash string) {
 	v := s.view(wt)
 	hist, _ := s.store.History(wt.UserID, wt.ID, 100)
-	d := pageData{Title: v.Title, Phone: sess.Phone, CSRF: sess.CSRF, LoggedIn: true, W: &v, Error: errMsg, Flash: flash,
+	d := pageData{Title: v.Title, UserID: sess.UserID, Phone: sess.Phone, CSRF: sess.CSRF, LoggedIn: true, W: &v, Error: errMsg, Flash: flash,
 		Intervals: intervalOpts(wt.IntervalMin)}
 	for _, h := range hist {
 		d.History = append(d.History, histView{FormatPence(h.PricePence, h.Currency) + basisSuffix(h.Basis), time.Unix(h.CheckedAt, 0).In(london).Format("2 Jan 2006, 15:04"), h.Method})
@@ -731,13 +782,13 @@ func (s *Server) handleDeleteWatch(w http.ResponseWriter, r *http.Request, sess 
 
 func (s *Server) handleAccount(w http.ResponseWriter, r *http.Request, sess *Session) {
 	n, _ := s.store.CountWatches(sess.UserID)
-	s.render(w, http.StatusOK, "account", pageData{Title: "Account", Phone: sess.Phone, CSRF: sess.CSRF, LoggedIn: true, Count: n})
+	s.render(w, http.StatusOK, "account", pageData{Title: "Account", UserID: sess.UserID, Phone: sess.Phone, CSRF: sess.CSRF, LoggedIn: true, Count: n})
 }
 
 func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request, sess *Session) {
 	if strings.TrimSpace(r.PostFormValue("confirm")) != "DELETE" {
 		n, _ := s.store.CountWatches(sess.UserID)
-		s.render(w, http.StatusBadRequest, "account", pageData{Title: "Account", Phone: sess.Phone, CSRF: sess.CSRF, LoggedIn: true, Count: n,
+		s.render(w, http.StatusBadRequest, "account", pageData{Title: "Account", UserID: sess.UserID, Phone: sess.Phone, CSRF: sess.CSRF, LoggedIn: true, Count: n,
 			Error: "Type DELETE in capitals to confirm."})
 		return
 	}
@@ -815,4 +866,67 @@ func (s *Server) handleDev(w http.ResponseWriter, r *http.Request) {
 		msgs = append(msgs, d)
 	}
 	s.render(w, http.StatusOK, "dev", pageData{Title: "Dev messages", Msgs: msgs})
+}
+
+// ---- handlers: notifications ----
+
+func (s *Server) notifView(n *Notification) notifView {
+	v := notifView{ID: n.ID, Kind: n.Kind, Title: n.Title, Body: n.Body, Unread: n.ReadAt == nil,
+		When: time.Unix(n.CreatedAt, 0).In(london).Format("2 Jan 2006, 15:04")}
+	if n.WatchID != nil {
+		v.WatchID = *n.WatchID
+	}
+	return v
+}
+
+func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request, sess *Session) {
+	ns, err := s.store.Notifications(sess.UserID, MaxNotificationsPerUser)
+	if err != nil {
+		slog.Error("list notifications", "err", RedactPII(err.Error()))
+		s.message(w, r, 500, "Error", "Something went wrong.")
+		return
+	}
+	d := pageData{Title: "Notifications", UserID: sess.UserID, Phone: sess.Phone, CSRF: sess.CSRF, LoggedIn: true,
+		Flash: flashes[r.URL.Query().Get("m")]}
+	for _, n := range ns {
+		d.Notifs = append(d.Notifs, s.notifView(n))
+	}
+	s.render(w, http.StatusOK, "notifications", d)
+}
+
+// handleNotificationCount returns the unread count as plain text, for the
+// optional same-origin script that keeps the header badge current.
+func (s *Server) handleNotificationCount(w http.ResponseWriter, r *http.Request, sess *Session) {
+	n, err := s.store.UnreadCount(sess.UserID)
+	if err != nil {
+		http.Error(w, "error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	fmt.Fprint(w, n)
+}
+
+func (s *Server) handleReadAll(w http.ResponseWriter, r *http.Request, sess *Session) {
+	if err := s.store.MarkAllNotificationsRead(sess.UserID); err != nil {
+		s.message(w, r, 500, "Error", "Could not save.")
+		return
+	}
+	http.Redirect(w, r, "/notifications?m=allread", http.StatusSeeOther)
+}
+
+func (s *Server) handleReadOne(w http.ResponseWriter, r *http.Request, sess *Session) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		err = ErrNotFound
+	} else {
+		err = s.store.MarkNotificationRead(sess.UserID, id)
+	}
+	switch {
+	case errors.Is(err, ErrNotFound):
+		s.message(w, r, http.StatusNotFound, "Not found", "That notification does not exist.")
+	case err != nil:
+		s.message(w, r, 500, "Error", "Could not save.")
+	default:
+		http.Redirect(w, r, "/notifications?m=read", http.StatusSeeOther)
+	}
 }

@@ -1,7 +1,12 @@
 {{define "content"}}
 <h1>Your watches</h1>
 
-<section class="card">
+{{with .Banner}}<section class="card banner {{.Kind}}" role="status">
+  <strong>{{if .WatchID}}<a href="/watches/{{.WatchID}}">{{.Title}}</a>{{else}}{{.Title}}{{end}}</strong>: {{.Body}}
+  <span class="hint">{{.When}} · <a href="/notifications">All notifications</a></span>
+</section>{{end}}
+
+{{if not .Dashboard}}<section class="card">
 <h2>WhatsApp alerts</h2>
 {{if not .Consented}}
 <p>Alerts are <strong>off</strong>: we have no record that you agreed to receive WhatsApp messages. Log out, then log in again and tick the agreement box.</p>
@@ -12,7 +17,7 @@
 <p>Alerts are <strong>off</strong>. Prices are still checked and shown here, but no WhatsApp messages are sent.</p>
 <form method="post" action="/account/alerts" class="inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="enabled" value="1"><button type="submit">Turn alerts on</button></form>
 {{end}}
-</section>
+</section>{{end}}
 
 <section class="card">
 <h2>Add a page to watch</h2>

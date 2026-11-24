@@ -1,0 +1,19 @@
+{{define "content"}}
+<h1>Notifications</h1>
+{{if .Notifs}}
+<form method="post" action="/notifications/read-all" class="row"><input type="hidden" name="csrf" value="{{.CSRF}}"><button type="submit">Mark all as read</button></form>
+<ul class="notifs">
+{{range .Notifs}}
+<li class="notif {{.Kind}}{{if .Unread}} unread{{end}}">
+  <div><strong>{{if .WatchID}}<a href="/watches/{{.WatchID}}">{{.Title}}</a>{{else}}{{.Title}}{{end}}</strong>{{if .Unread}} <span class="badge pending">New</span>{{end}}</div>
+  <div>{{.Body}}</div>
+  <div class="hint">{{.When}}{{if not .WatchID}} · watch no longer exists{{end}}</div>
+  {{if .Unread}}<form method="post" action="/notifications/{{.ID}}/read" class="inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button type="submit">Mark as read</button></form>{{end}}
+</li>
+{{end}}
+</ul>
+<p class="hint">The newest 200 are kept, and older ones are removed after the retention period.</p>
+{{else}}
+<p>No notifications yet. Price alerts appear here.</p>
+{{end}}
+{{end}}

@@ -1,5 +1,9 @@
 {{define "content"}}
 <h1>Log in</h1>
+{{if .Dashboard}}
+<p>Ask the administrator for a login link.</p>
+<p class="hint">The link works once and expires in 15 minutes.</p>
+{{else}}
 <p>Enter your WhatsApp number and we will send you a one-time login link. No password needed.</p>
 <form method="post" action="/login" class="stack">
   <input type="hidden" name="csrf" value="{{.CSRF}}">
@@ -9,4 +13,5 @@
   <p class="hint">You can stop them at any time: reply STOP to a message, or switch alerts off on your dashboard.</p>
   <button type="submit">Send login link</button>
 </form>
+{{end}}
 {{end}}

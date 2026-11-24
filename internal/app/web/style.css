@@ -44,3 +44,11 @@ details{margin:.25rem 0}
 }
 input[type=checkbox]{width:auto;margin-right:.5rem}
 label.check{font-weight:400}
+.count{display:inline-block;min-width:1.3rem;padding:0 .35rem;border-radius:999px;background:var(--bad);color:#fff;font-size:.75rem;text-align:center}
+.count[hidden]{display:none}
+ul.notifs{list-style:none;padding:0;margin:0}
+.notif{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--line);border-radius:6px;padding:.6rem .8rem;margin:.6rem 0}
+.notif.unread{border-left-color:var(--accent)}
+.notif.below_target{border-left-color:var(--ok)}
+.banner{border-left:4px solid var(--accent)}
+.banner.below_target{border-left-color:var(--ok)}
