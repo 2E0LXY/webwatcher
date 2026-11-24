@@ -1,0 +1,27 @@
+# Replace watch.example.com with your host name, then include this file from
+# your main Caddyfile (or paste it in). Caddy obtains the TLS certificate.
+watch.example.com {
+	encode zstd gzip
+
+	# Never write magic-link URLs (which contain the login token) to the access log.
+	@auth path /auth/*
+	log_skip @auth
+
+	log {
+		output file /var/log/caddy/webwatcher.log
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		-Server
+	}
+
+	reverse_proxy 127.0.0.1:8780 {
+		# Webwatcher trusts the last X-Forwarded-For entry from loopback only.
+		header_up X-Forwarded-For {remote_host}
+	}
+}
