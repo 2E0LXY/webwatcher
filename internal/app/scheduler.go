@@ -132,12 +132,12 @@ func (s *Scheduler) check(ctx context.Context, w *Watch) {
 func (s *Scheduler) onSuccess(ctx context.Context, w *Watch, res *Result) {
 	if res.NotModified {
 		iv := s.interval(w)
-		if err := s.store.RecordNotModified(w.ID, s.clock.Now().Add(iv+s.jitter(iv)).Unix(), &w.Version); err != nil && !errors.Is(err, ErrStale) {
+		if err := s.store.RecordNotModified(w.ID, s.clock.Now().Add(iv+s.jitter(iv)).Unix(), &w.Version, metaOf(nil, res)); err != nil && !errors.Is(err, ErrStale) {
 			slog.Error("record not modified", "watch", w.ID, "host", hostOf(w.URL), "err", RedactPII(err.Error()))
 		}
 		return
 	}
-	obs := Observation{Price: res.PricePence, Currency: res.Currency, Method: res.Method, Basis: res.Basis, ETag: res.ETag, LastModified: res.LastModified, Version: &w.Version}
+	obs := Observation{Price: res.PricePence, Currency: res.Currency, Method: res.Method, Basis: res.Basis, ETag: res.ETag, LastModified: res.LastModified, Version: &w.Version, Meta: metaOf(nil, res)}
 	obs.CurrencyMismatch = w.TargetPence != nil && obs.Currency != w.TargetCurrency
 	if obs.Basis == "" {
 		obs.Basis = BasisUnknown
@@ -145,7 +145,7 @@ func (s *Scheduler) onSuccess(ctx context.Context, w *Watch, res *Result) {
 	iv := s.interval(w)
 	next := s.clock.Now().Add(iv + s.jitter(iv)).Unix()
 	if res.SoldOut {
-		if err := s.store.RecordSoldOut(w.ID, next, &w.Version); err != nil && !errors.Is(err, ErrStale) {
+		if err := s.store.RecordSoldOut(w.ID, next, &w.Version, metaOf(nil, res)); err != nil && !errors.Is(err, ErrStale) {
 			slog.Error("record sold out", "watch", w.ID, "host", hostOf(w.URL), "err", RedactPII(err.Error()))
 		}
 		return
@@ -174,6 +174,17 @@ func (s *Scheduler) onSuccess(ctx context.Context, w *Watch, res *Result) {
 	if err := s.store.RecordObservation(w.ID, obs, next, &res.PricePence, qa); err != nil && !errors.Is(err, ErrStale) {
 		slog.Error("record success", "watch", w.ID, "host", hostOf(w.URL), "err", RedactPII(err.Error()))
 	}
+}
+
+// metaOf builds the check-log detail for a result or a failure.
+func metaOf(fail *CheckFailure, res *Result) CheckMeta {
+	switch {
+	case fail != nil:
+		return CheckMeta{Class: fail.Class, Timing: fail.Timing}
+	case res != nil:
+		return CheckMeta{Timing: res.Timing}
+	}
+	return CheckMeta{}
 }
 
 func hostOf(raw string) string {
@@ -215,7 +226,7 @@ func (s *Scheduler) onFailure(ctx context.Context, w *Watch, fail *CheckFailure)
 	if failures >= MaxFailures && !w.FailureNotif && w.AlertsOn {
 		notice = &QueuedAlert{Kind: AlertFailed, Msg: BuildAlertMessage(AlertFailed, w, nil, 0, fail.Reason, s.baseURL)}
 	}
-	if err := s.store.RecordFailure(w.ID, fail.Status, fail.Reason, failures, next, notice, &w.Version); err != nil && !errors.Is(err, ErrStale) {
+	if err := s.store.RecordFailure(w.ID, fail.Status, fail.Reason, failures, next, notice, &w.Version, metaOf(fail, nil)); err != nil && !errors.Is(err, ErrStale) {
 		slog.Error("record failure", "watch", w.ID, "host", hostOf(w.URL), "err", RedactPII(err.Error()))
 	}
 }

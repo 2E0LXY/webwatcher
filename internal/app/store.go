@@ -600,14 +600,20 @@ type Observation struct {
 	LastModified string
 	// CurrencyMismatch: the price is in a different currency from the watch's target.
 	CurrencyMismatch bool
+	// Meta is the diagnostic detail for the check log.
+	Meta CheckMeta
 	// Version is the watch version the check started from. If the watch has
 	// been edited, paused or deleted since, the result is dropped (ErrStale).
 	Version *int64
 }
 
 // logCheck appends a diagnostics row. detail never holds URLs or numbers.
-func logCheck(tx *sql.Tx, id, now int64, outcome, detail string) error {
-	_, err := tx.Exec(`INSERT INTO check_log(watch_id, checked_at, outcome, detail) VALUES(?,?,?,?)`, id, now, outcome, RedactPII(detail))
+func logCheck(tx *sql.Tx, id, now int64, outcome, detail string, meta ...CheckMeta) error {
+	m := firstMeta(meta)
+	ms := func(d time.Duration) int64 { return d.Milliseconds() }
+	_, err := tx.Exec(`INSERT INTO check_log(watch_id, checked_at, outcome, detail, class, retry, dns_ms, connect_ms, tls_ms, ttfb_ms, total_ms)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?)`, id, now, outcome, RedactPII(detail), m.Class, m.Retry,
+		ms(m.Timing.DNS), ms(m.Timing.Connect), ms(m.Timing.TLS), ms(m.Timing.TTFB), ms(m.Timing.Total))
 	return err
 }
 
@@ -633,7 +639,7 @@ func (s *Store) RecordObservation(id int64, o Observation, next int64, base *int
 		price, cur, o.Basis, method, now, next, base, o.ETag, o.LastModified, o.CurrencyMismatch, id); err != nil {
 		return err
 	}
-	if err := logCheck(tx, id, now, "ok", method); err != nil {
+	if err := logCheck(tx, id, now, "ok", method, o.Meta); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`INSERT INTO price_history(watch_id, price_pence, currency, basis, method, checked_at) VALUES(?,?,?,?,?,?)`,
@@ -671,7 +677,7 @@ func (s *Store) RecordBasisChange(id int64, o Observation, next int64) error {
 		o.Method, now, next, o.Price, o.Currency, o.Basis, o.ETag, o.LastModified, o.CurrencyMismatch, id); err != nil {
 		return err
 	}
-	if err := logCheck(tx, id, now, "basis_changed", o.Method); err != nil {
+	if err := logCheck(tx, id, now, "basis_changed", o.Method, o.Meta); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`INSERT INTO price_history(watch_id, price_pence, currency, basis, method, checked_at) VALUES(?,?,?,?,?,?)`,
@@ -698,7 +704,7 @@ func (s *Store) ConfirmBasis(uid, id int64) error {
 
 // RecordSoldOut notes that the page says the item is sold out. The last valid
 // price, baseline and alert state are kept and no price is recorded.
-func (s *Store) RecordSoldOut(id int64, next int64, ver *int64) error {
+func (s *Store) RecordSoldOut(id int64, next int64, ver *int64, meta ...CheckMeta) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -712,7 +718,7 @@ func (s *Store) RecordSoldOut(id int64, next int64, ver *int64) error {
 		now, next, id); err != nil {
 		return err
 	}
-	if err := logCheck(tx, id, now, "sold_out", ""); err != nil {
+	if err := logCheck(tx, id, now, "sold_out", "", meta...); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -720,7 +726,7 @@ func (s *Store) RecordSoldOut(id int64, next int64, ver *int64) error {
 
 // RecordNotModified notes a successful conditional GET answered with 304: the
 // page is unchanged, so the last valid observation stands.
-func (s *Store) RecordNotModified(id int64, next int64, ver *int64) error {
+func (s *Store) RecordNotModified(id int64, next int64, ver *int64, meta ...CheckMeta) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -734,7 +740,7 @@ func (s *Store) RecordNotModified(id int64, next int64, ver *int64) error {
 		now, next, id); err != nil {
 		return err
 	}
-	if err := logCheck(tx, id, now, "not_modified", ""); err != nil {
+	if err := logCheck(tx, id, now, "not_modified", "", meta...); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -742,7 +748,7 @@ func (s *Store) RecordNotModified(id int64, next int64, ver *int64) error {
 
 // RecordFailure stores a failed check. status is one of error, blocked, stopped.
 // A non-nil notice is queued and the watch marked as notified, atomically.
-func (s *Store) RecordFailure(id int64, status, reason string, failures int, next int64, notice *QueuedAlert, ver *int64) error {
+func (s *Store) RecordFailure(id int64, status, reason string, failures int, next int64, notice *QueuedAlert, ver *int64, meta ...CheckMeta) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -760,7 +766,7 @@ func (s *Store) RecordFailure(id int64, status, reason string, failures int, nex
 		status, reason, failures, now, next, id); err != nil {
 		return err
 	}
-	if err := logCheck(tx, id, now, status, reason); err != nil {
+	if err := logCheck(tx, id, now, status, reason, meta...); err != nil {
 		return err
 	}
 	if notice != nil {
@@ -915,4 +921,36 @@ func (s *Store) UsePersonalLink(hash string) (int64, error) {
 func (s *Store) IsAdmin(uid int64) bool {
 	var a int
 	return s.db.QueryRow(`SELECT is_admin FROM users WHERE id=?`, uid).Scan(&a) == nil && a != 0
+}
+
+// CheckInfo is one row of the per-watch check log, without URLs.
+type CheckInfo struct {
+	At      int64
+	Outcome string
+	Detail  string
+	Class   string
+	Retry   int
+	Timing  Timing
+}
+
+// RecentChecks returns the newest check log rows of a watch, only if uid owns it.
+func (s *Store) RecentChecks(uid, watchID int64, limit int) ([]CheckInfo, error) {
+	rows, err := s.db.Query(`SELECT c.checked_at,c.outcome,c.detail,c.class,c.retry,c.dns_ms,c.connect_ms,c.tls_ms,c.ttfb_ms,c.total_ms
+		FROM check_log c JOIN watches w ON w.id=c.watch_id WHERE c.watch_id=? AND w.user_id=? ORDER BY c.id DESC LIMIT ?`, watchID, uid, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []CheckInfo
+	for rows.Next() {
+		var c CheckInfo
+		var d, co, t, tt, tot int64
+		if err := rows.Scan(&c.At, &c.Outcome, &c.Detail, &c.Class, &c.Retry, &d, &co, &t, &tt, &tot); err != nil {
+			return nil, err
+		}
+		ms := func(n int64) time.Duration { return time.Duration(n) * time.Millisecond }
+		c.Timing = Timing{DNS: ms(d), Connect: ms(co), TLS: ms(t), TTFB: ms(tt), Total: ms(tot)}
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }

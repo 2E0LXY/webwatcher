@@ -32,6 +32,7 @@ type Page struct {
 	Header      http.Header
 	Body        []byte
 	Truncated   bool
+	Timing      Timing // per-phase durations of this fetch
 }
 
 // Fetcher retrieves a page. The interface exists so a headless-browser
@@ -46,12 +47,16 @@ type Conditional struct{ ETag, LastModified string }
 
 // FetchError is a transport-level failure.
 type FetchError struct {
-	Kind string // invalid, ssrf, network, truncated, disallowed, ratelimit
-	Msg  string
-	Wait time.Duration // for ratelimit: how long until the host may be used again
+	Kind   string // invalid, ssrf, network, truncated, disallowed, ratelimit
+	Msg    string
+	Wait   time.Duration // for ratelimit: how long until the host may be used again
+	Class  string        // failure class (see diag.go); empty for policy outcomes
+	Timing Timing
+	Err    error // the underlying error, for classification
 }
 
 func (e *FetchError) Error() string { return e.Msg }
+func (e *FetchError) Unwrap() error { return e.Err }
 
 var userAgent = "webwatcher/dev (+https://github.com/2E0LXY/webwatcher; personal price monitor)"
 
@@ -161,7 +166,12 @@ func (f *HTTPFetcher) precheck(ctx context.Context, u *url.URL) error {
 		if errors.Is(err, errBlockedDest) {
 			return &FetchError{Kind: "ssrf", Msg: "the site resolves to an address that is not allowed"}
 		}
-		return &FetchError{Kind: "network", Msg: err.Error()}
+		class := ClassNetworkOther
+		var dnsErr *net.DNSError
+		if errors.As(err, &dnsErr) {
+			class = ClassDNS
+		}
+		return &FetchError{Kind: "network", Msg: err.Error(), Class: class, Err: err}
 	}
 	return nil
 }
@@ -178,19 +188,35 @@ func seenHost(via []*http.Request, u *url.URL) bool {
 func cloneURL(u *url.URL) *url.URL { c := *u; return &c }
 
 func (f *HTTPFetcher) Fetch(ctx context.Context, rawURL string, cond *Conditional) (*Page, error) {
+	ts := newTraceState()
+	ctx = ts.attach(ctx)
+	// withTiming stamps a transport failure with how far the fetch got.
+	withTiming := func(fe *FetchError) (*Page, error) {
+		fe.Timing = ts.finish()
+		return nil, fe
+	}
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return nil, &FetchError{Kind: "invalid", Msg: "invalid URL"}
+		return withTiming(&FetchError{Kind: "invalid", Msg: "invalid URL"})
 	}
 	if err := f.precheck(ctx, u); err != nil {
+		var fe *FetchError
+		if errors.As(err, &fe) {
+			return withTiming(fe)
+		}
 		return nil, err
 	}
 	if err := f.robotsCheck(ctx, u); err != nil {
+		var fe *FetchError
+		if errors.As(err, &fe) {
+			fe.Class = ClassRobots
+			return withTiming(fe)
+		}
 		return nil, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return nil, &FetchError{Kind: "invalid", Msg: "invalid URL"}
+		return withTiming(&FetchError{Kind: "invalid", Msg: "invalid URL"})
 	}
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5")
@@ -207,28 +233,29 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, rawURL string, cond *Conditiona
 	if err != nil {
 		var fe *FetchError
 		if errors.As(err, &fe) {
-			return nil, fe
+			return withTiming(fe)
 		}
 		if errors.Is(err, errBlockedDest) {
-			return nil, &FetchError{Kind: "ssrf", Msg: "the site resolves to an address that is not allowed"}
+			return withTiming(&FetchError{Kind: "ssrf", Msg: "the site resolves to an address that is not allowed"})
 		}
-		return nil, &FetchError{Kind: "network", Msg: "network error: " + shortErr(err)}
+		return withTiming(&FetchError{Kind: "network", Msg: "network error: " + shortErr(err), Class: classifyNetErr(err, ts), Err: err})
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxBodyBytes+1))
 	if err != nil {
 		// A partial body is never parsed: half a page can hold a wrong price.
-		return nil, &FetchError{Kind: "truncated", Msg: "the connection ended before the whole page arrived; it was not parsed (" + shortErr(err) + ")"}
+		return withTiming(&FetchError{Kind: "truncated", Msg: "the connection ended before the whole page arrived; it was not parsed (" + shortErr(err) + ")", Class: classifyBodyErr(err), Err: err})
 	}
 	if cl := resp.ContentLength; cl >= 0 && len(body) <= MaxBodyBytes && int64(len(body)) != cl &&
 		resp.StatusCode != http.StatusNotModified && resp.StatusCode != http.StatusNoContent {
-		return nil, &FetchError{Kind: "truncated", Msg: "the page length did not match what the site announced; it was not parsed"}
+		return withTiming(&FetchError{Kind: "truncated", Msg: "the page length did not match what the site announced; it was not parsed", Class: ClassConnectReset})
 	}
 	p := &Page{NotModified: resp.StatusCode == http.StatusNotModified && cond != nil, URL: resp.Request.URL.String(), Status: resp.StatusCode, ContentType: resp.Header.Get("Content-Type"), Header: resp.Header}
 	if len(body) > MaxBodyBytes {
 		body, p.Truncated = body[:MaxBodyBytes], true
 	}
 	p.Body = body
+	p.Timing = ts.finish()
 	return p, nil
 }
 

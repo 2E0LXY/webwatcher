@@ -15,6 +15,7 @@
 </dl>
 {{if .BasisChanged}}<p class="error">{{.BasisNote}}</p>
 <form method="post" action="/watches/{{.ID}}/confirm-basis" class="inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button type="submit">Confirm new basis and reset baseline</button></form>{{end}}
+{{with $.Fail}}<p class="error"><strong>Last failure: {{.Class}}{{if .Kind}} ({{.Kind}}){{end}}.</strong> {{.Hint}}</p>{{end}}
 {{if .CurrencyMismatch}}<p class="error">{{.MismatchNote}}</p>{{end}}
 {{if .CurrencyMismatch}}<p class="error">{{.MismatchNote}}</p>{{end}}
 {{if eq .Status "blocked"}}<p class="error">This site is blocking automated checks. Webwatcher does not try to get round bot protection, so this page cannot be watched for now.</p>{{end}}
@@ -42,6 +43,16 @@
 <form method="post" action="/watches/{{.ID}}/delete" class="inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button type="submit" class="danger">Delete this watch</button></form>
 </div>
 {{end}}
+
+<h2>Recent checks</h2>
+{{if .Checks}}
+<div class="tablewrap">
+<table>
+<thead><tr><th>When</th><th>Outcome</th><th>Class</th><th>Timings</th></tr></thead>
+<tbody>{{range .Checks}}<tr><td>{{.When}}</td><td>{{.Outcome}}{{if .Retry}} ({{.Retry}}){{end}}</td><td>{{if .Class}}{{.Class}}{{else}}–{{end}}</td><td>{{.Timing}}</td></tr>{{end}}</tbody>
+</table>
+</div>
+{{else}}<p>No checks yet.</p>{{end}}
 
 <h2>Price history</h2>
 {{if .History}}

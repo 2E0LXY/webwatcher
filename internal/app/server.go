@@ -323,6 +323,22 @@ func currencyOpts(sel string) []curOpt {
 	return out
 }
 
+type checkView struct {
+	When, Outcome, Class, Retry, Timing string
+}
+
+type failView struct {
+	Class, Kind, Hint, When string
+}
+
+func fmtTiming(t Timing) string {
+	if t == (Timing{}) {
+		return "–"
+	}
+	return fmt.Sprintf("dns %d ms, connect %d ms, tls %d ms, first byte %d ms, total %d ms",
+		t.DNS.Milliseconds(), t.Connect.Milliseconds(), t.TLS.Milliseconds(), t.TTFB.Milliseconds(), t.Total.Milliseconds())
+}
+
 type histView struct{ Price, When, Method string }
 
 type formVals struct {
@@ -347,6 +363,8 @@ type pageData struct {
 	History     []histView
 	Intervals   []intervalOpt
 	Currencies  []curOpt
+	Checks      []checkView
+	Fail        *failView
 	Count       int
 	Cap         int
 	Msgs        []devMsg
@@ -752,6 +770,19 @@ func (s *Server) renderWatch(w http.ResponseWriter, status int, sess *Session, w
 		Intervals: intervalOpts(wt.IntervalMin), Currencies: currencyOpts(wt.TargetCurrency)}
 	for _, h := range hist {
 		d.History = append(d.History, histView{FormatPence(h.PricePence, h.Currency) + basisSuffix(h.Basis), time.Unix(h.CheckedAt, 0).In(london).Format("2 Jan 2006, 15:04"), h.Method})
+	}
+	if cs, err := s.store.RecentChecks(wt.UserID, wt.ID, 12); err == nil {
+		for i, c := range cs {
+			when := time.Unix(c.At, 0).In(london).Format("2 Jan, 15:04")
+			retry := ""
+			if c.Retry > 0 {
+				retry = fmt.Sprintf("quick retry %d", c.Retry)
+			}
+			d.Checks = append(d.Checks, checkView{when, c.Outcome, c.Class, retry, fmtTiming(c.Timing)})
+			if i == 0 && c.Class != "" && FailureHint(c.Class) != "" {
+				d.Fail = &failView{c.Class, FailureKind(c.Class), FailureHint(c.Class), when}
+			}
+		}
 	}
 	s.render(w, status, "watch", d)
 }
